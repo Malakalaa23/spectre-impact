@@ -1,0 +1,321 @@
+# GitHub Pull Request Webhook Notes
+
+## What is a GitHub Webhook?
+
+A webhook is an automatic HTTP POST request sent by GitHub whenever a specific event happens.
+
+In our project, the event is:
+
+- Pull Request opened
+- Pull Request updated
+- Pull Request closed
+- etc.
+
+GitHub sends a JSON object (called the payload) to our FastAPI backend.
+
+Our backend receives this payload and extracts only the information we need.
+
+---
+
+# Payload Structure
+
+The payload is a JSON object.
+
+JSON consists of:
+
+- Objects
+- Arrays
+- Strings
+- Numbers
+- Booleans
+- null
+
+Example:
+
+{
+    "action": "opened",
+    "number": 15,
+    "repository": { ... },
+    "pull_request": { ... },
+    "sender": { ... }
+}
+
+---
+
+# Main Fields GitHub Sends
+
+## action
+
+Type:
+String
+
+Example:
+
+"opened"
+
+Purpose:
+
+Tells us what happened.
+
+Possible examples:
+
+- opened
+- closed
+- reopened
+- synchronize
+- edited
+- assigned
+- unassigned
+
+---
+
+## number
+
+Type:
+Integer
+
+Example:
+
+15
+
+Purpose:
+
+The Pull Request number.
+
+---
+
+## repository
+
+Type:
+Object
+
+Purpose:
+
+Contains information about the GitHub repository.
+
+Common fields:
+
+- name
+- full_name
+- owner
+- private
+- default_branch
+- html_url
+
+Example:
+
+repository.name
+
+↓
+
+"spectre-impact"
+
+---
+
+## pull_request
+
+Type:
+Object
+
+Purpose:
+
+Contains almost all information about the Pull Request itself.
+
+Examples of fields inside it:
+
+- number
+- title
+- body
+- state
+- draft
+- merged
+- user
+- head
+- base
+- created_at
+- updated_at
+- html_url
+
+This is the largest object in the payload.
+
+---
+
+## sender
+
+Type:
+Object
+
+Purpose:
+
+Information about the user who triggered the event.
+
+Examples:
+
+sender.login
+
+↓
+
+"abubakr"
+
+Other fields include:
+
+- id
+- avatar_url
+- html_url
+- type
+
+---
+
+## organization
+
+Type:
+Object (optional)
+
+Only exists if the repository belongs to an organization.
+
+---
+
+## installation
+
+Type:
+Object (optional)
+
+Information about the GitHub App installation.
+
+Needed when using GitHub Apps.
+
+---
+
+## enterprise
+
+Type:
+Object (optional)
+
+Only exists for GitHub Enterprise.
+
+Not needed for our MVP.
+
+---
+
+## assignee
+
+Type:
+Object or null
+
+Only exists for assignment events.
+
+Example:
+
+action = assigned
+
+Then assignee contains the assigned user.
+
+---
+
+
+# What We Need for MVP
+
+We DO NOT need the entire payload.
+
+Our parser will initially extract only:
+
+action
+
+Type:
+String
+
+Reason:
+Know what event occurred.
+
+--------------------------
+
+repository.name
+
+Type:
+String
+
+Reason:
+Know which repository triggered the webhook.
+
+--------------------------
+
+pull_request.number
+
+Type:
+Integer
+
+Reason:
+Identify the Pull Request.
+
+--------------------------
+
+pull_request.title
+
+Type:
+String
+
+Reason:
+Display the Pull Request title.
+
+--------------------------
+
+sender.login
+
+Type:
+String
+
+Reason:
+Know who opened the Pull Request.
+
+---
+
+# Future Fields
+
+Later we may also extract:
+
+pull_request.body
+
+Purpose:
+AI deployment review.
+
+--------------------------
+
+pull_request.changed_files
+
+Purpose:
+Blast Radius analysis.
+
+--------------------------
+
+pull_request.base.ref
+
+Purpose:
+Target branch.
+
+--------------------------
+
+pull_request.head.ref
+
+Purpose:
+Source branch.
+
+--------------------------
+
+pull_request.created_at
+
+Purpose:
+Timeline.
+
+--------------------------
+
+pull_request.updated_at
+
+Purpose:
+History.
+
+--------------------------
+
+pull_request.html_url
+
+Purpose:
+Link back to GitHub.

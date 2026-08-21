@@ -1,0 +1,11 @@
+login_service:
+  feature: "User Login"
+  users_percentage: 60
+
+checkout_service:
+  feature: "Checkout / Payments"
+  users_percentage: 80
+
+payment_service:
+  feature: "Credit Card Processing"
+  users_percentage: 100

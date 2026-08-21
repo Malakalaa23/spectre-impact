@@ -1,0 +1,31 @@
+services:
+  payment_service:
+    dependencies:
+      - resource: customer_database
+  checkout_service:
+    dependencies:
+      - resource: customer_database
+  login_service:
+    dependencies:
+      - resource: customer_database
+  profile_service:
+    dependencies:
+      - resource: customer_database
+  login_api:
+    dependencies:
+      - resource: customer_database
+  checkout_api:
+    dependencies:
+      - resource: customer_database
+  profile_api:
+    dependencies:
+      - resource: customer_database
+  login_journey:
+    dependencies:
+      - resource: customer_database
+  checkout_journey:
+    dependencies:
+      - resource: customer_database
+  profile_journey:
+    dependencies:
+      - resource: customer_database

@@ -1,0 +1,236 @@
+{
+  "nodes": [
+    {
+      "id": "checkout_api",
+      "type": "api",
+      "owner": "payments-team",
+      "criticality": "critical",
+      "children": [
+        "web_frontend",
+        "mobile_app"
+      ],
+      "impacted": true,
+      "changed": false
+    },
+    {
+      "id": "checkout_journey",
+      "type": "customer_journey",
+      "owner": "product-team",
+      "criticality": "critical",
+      "children": [
+        "revenue_generation"
+      ],
+      "impacted": true,
+      "changed": false
+    },
+    {
+      "id": "customer_retention",
+      "type": "business",
+      "owner": "management",
+      "criticality": "high",
+      "children": [],
+      "impacted": true,
+      "changed": false
+    },
+    {
+      "id": "customer_satisfaction",
+      "type": "business",
+      "owner": "management",
+      "criticality": "medium",
+      "children": [],
+      "impacted": true,
+      "changed": false
+    },
+    {
+      "id": "login_journey",
+      "type": "customer_journey",
+      "owner": "product-team",
+      "criticality": "critical",
+      "children": [
+        "customer_retention"
+      ],
+      "impacted": true,
+      "changed": false
+    },
+    {
+      "id": "mobile_app",
+      "type": "mobile_app",
+      "owner": "mobile-team",
+      "criticality": "high",
+      "children": [
+        "login_journey",
+        "checkout_journey"
+      ],
+      "impacted": true,
+      "changed": false
+    },
+    {
+      "id": "payment_service",
+      "type": "service",
+      "owner": "payments-team",
+      "criticality": "critical",
+      "children": [
+        "checkout_api"
+      ],
+      "impacted": true,
+      "changed": true
+    },
+    {
+      "id": "profile_journey",
+      "type": "customer_journey",
+      "owner": "product-team",
+      "criticality": "medium",
+      "children": [
+        "customer_satisfaction"
+      ],
+      "impacted": true,
+      "changed": false
+    },
+    {
+      "id": "revenue_generation",
+      "type": "business",
+      "owner": "management",
+      "criticality": "critical",
+      "children": [],
+      "impacted": true,
+      "changed": false
+    },
+    {
+      "id": "web_frontend",
+      "type": "frontend",
+      "owner": "frontend-team",
+      "criticality": "high",
+      "children": [
+        "login_journey",
+        "checkout_journey",
+        "profile_journey"
+      ],
+      "impacted": true,
+      "changed": false
+    }
+  ],
+  "links": [
+    {
+      "source": "payment_service",
+      "target": "checkout_api"
+    },
+    {
+      "source": "checkout_api",
+      "target": "web_frontend"
+    },
+    {
+      "source": "checkout_api",
+      "target": "mobile_app"
+    },
+    {
+      "source": "web_frontend",
+      "target": "login_journey"
+    },
+    {
+      "source": "web_frontend",
+      "target": "checkout_journey"
+    },
+    {
+      "source": "web_frontend",
+      "target": "profile_journey"
+    },
+    {
+      "source": "mobile_app",
+      "target": "login_journey"
+    },
+    {
+      "source": "mobile_app",
+      "target": "checkout_journey"
+    },
+    {
+      "source": "login_journey",
+      "target": "customer_retention"
+    },
+    {
+      "source": "checkout_journey",
+      "target": "revenue_generation"
+    },
+    {
+      "source": "profile_journey",
+      "target": "customer_satisfaction"
+    }
+  ],
+  "analysis": {
+    "changed_resource": "payment_service",
+    "changed_resources": [
+      "payment_service"
+    ],
+    "affected_services": [
+      "checkout_api",
+      "checkout_journey",
+      "customer_retention",
+      "customer_satisfaction",
+      "login_journey",
+      "mobile_app",
+      "payment_service",
+      "profile_journey",
+      "revenue_generation",
+      "web_frontend"
+    ],
+    "business_impact": 100,
+    "unknown_resources": [],
+    "evidence": [
+      [
+        "payment_service",
+        "checkout_api"
+      ],
+      [
+        "payment_service",
+        "checkout_api",
+        "web_frontend",
+        "checkout_journey"
+      ],
+      [
+        "payment_service",
+        "checkout_api",
+        "web_frontend",
+        "login_journey",
+        "customer_retention"
+      ],
+      [
+        "payment_service",
+        "checkout_api",
+        "web_frontend",
+        "profile_journey",
+        "customer_satisfaction"
+      ],
+      [
+        "payment_service",
+        "checkout_api",
+        "web_frontend",
+        "login_journey"
+      ],
+      [
+        "payment_service",
+        "checkout_api",
+        "mobile_app"
+      ],
+      [
+        "payment_service"
+      ],
+      [
+        "payment_service",
+        "checkout_api",
+        "web_frontend",
+        "profile_journey"
+      ],
+      [
+        "payment_service",
+        "checkout_api",
+        "web_frontend",
+        "checkout_journey",
+        "revenue_generation"
+      ],
+      [
+        "payment_service",
+        "checkout_api",
+        "web_frontend"
+      ]
+    ]
+  }
+}
