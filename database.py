@@ -31,6 +31,21 @@ def init_db():
         )
         """
     )
+    conn.execute(
+        """
+        CREATE TABLE IF NOT EXISTS commit_analyses (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            commit_sha TEXT NOT NULL,
+            repo_name TEXT NOT NULL,
+            branch TEXT,
+            changed_files TEXT,
+            affected_services TEXT,
+            business_impact INTEGER,
+            suggestions TEXT,
+            created_at TEXT NOT NULL
+        )
+        """
+    )
     conn.commit()
     conn.close()
 
@@ -93,6 +108,73 @@ def get_pr_analysis(pr_number: int):
     finally:
         conn.close()
     return [_row_to_dict(row) for row in rows]
+
+
+def save_commit_analysis(commit_sha: str, repo_name: str, branch: str, changed_files: list, bfs_result: dict, suggestions: list):
+    conn = _get_connection()
+    try:
+        conn.execute(
+            """
+            INSERT INTO commit_analyses (
+                commit_sha, repo_name, branch, changed_files,
+                affected_services, business_impact, suggestions, created_at
+            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+            """,
+            (
+                commit_sha,
+                repo_name,
+                branch,
+                json.dumps(changed_files),
+                json.dumps(bfs_result.get("affected_services", [])),
+                bfs_result.get("business_impact"),
+                json.dumps(suggestions),
+                datetime.now(timezone.utc).isoformat(),
+            ),
+        )
+        conn.commit()
+    finally:
+        conn.close()
+
+
+def _commit_row_to_dict(row: sqlite3.Row) -> dict:
+    record = dict(row)
+    for field in ("changed_files", "affected_services", "suggestions"):
+        if record.get(field):
+            record[field] = json.loads(record[field])
+    return record
+
+
+def is_commit_analyzed(commit_sha: str) -> bool:
+    conn = _get_connection()
+    try:
+        row = conn.execute(
+            "SELECT 1 FROM commit_analyses WHERE commit_sha = ? LIMIT 1", (commit_sha,)
+        ).fetchone()
+    finally:
+        conn.close()
+    return row is not None
+
+
+def get_all_commit_analyses(limit: int = 50):
+    conn = _get_connection()
+    try:
+        rows = conn.execute(
+            "SELECT * FROM commit_analyses ORDER BY id DESC LIMIT ?", (limit,)
+        ).fetchall()
+    finally:
+        conn.close()
+    return [_commit_row_to_dict(row) for row in rows]
+
+
+def get_commit_analysis(commit_sha: str):
+    conn = _get_connection()
+    try:
+        rows = conn.execute(
+            "SELECT * FROM commit_analyses WHERE commit_sha = ? ORDER BY id DESC", (commit_sha,)
+        ).fetchall()
+    finally:
+        conn.close()
+    return [_commit_row_to_dict(row) for row in rows]
 
 
 init_db()

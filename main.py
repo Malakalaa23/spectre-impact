@@ -119,8 +119,9 @@ def calculate_blast_radius(changed_files: list):
 # -------------------------------------------------------------------
 # AI agent and other modules
 # -------------------------------------------------------------------
-from database import get_all_analyses, get_pr_analysis, save_analysis
-from github_client import post_github_comment
+from database import get_all_analyses, get_pr_analysis, save_analysis, save_commit_analysis, is_commit_analyzed, get_all_commit_analyses
+from github_client import post_github_comment, post_inline_comment, get_pr_for_branch, fetch_commit_diff
+from diff_parser import parse_unified_diff
 
 try:
     from ai_agent_groq import generate_insights
@@ -149,6 +150,18 @@ def parse_payload(payload: dict):
     repo_full_name = payload.get("repository", {}).get("full_name")
     action = payload.get("action")
     return pr_number, repo_full_name, action
+
+def parse_push_payload(payload: dict):
+    branch = payload.get("ref", "").replace("refs/heads/", "")
+    repo_full_name = payload.get("repository", {}).get("full_name")
+    commit_sha = payload.get("after")
+    head_commit = payload.get("head_commit") or {}
+    changed_files = list(set(
+        head_commit.get("added", [])
+        + head_commit.get("removed", [])
+        + head_commit.get("modified", [])
+    ))
+    return branch, repo_full_name, commit_sha, changed_files
 
 def fetch_changed_files(repo_full_name: str, pr_number: int) -> list:
     if not GITHUB_TOKEN:
@@ -209,6 +222,49 @@ def run_analysis_pipeline(pr_number: int, repo_name: str, action: str):
         log(f"❌ GitHub comment failed: {e}")
         log(traceback.format_exc())
 
+def run_push_analysis_pipeline(commit_sha: str, repo_name: str, branch: str, changed_files: list):
+    log(f"🚀 Push pipeline started for commit {commit_sha} on {branch} in {repo_name}")
+    log(f"📄 Changed files: {changed_files}")
+
+    try:
+        blast = calculate_blast_radius(changed_files)
+        log(f"💥 Blast radius: {blast}")
+    except Exception as e:
+        log(f"❌ BFS failed: {e}")
+        log(traceback.format_exc())
+        return
+
+    try:
+        insights = generate_insights(blast["affected_services"], blast["business_impact"])
+        log(f"🤖 Insights generated: {insights.get('severity', 'Unknown')}")
+    except Exception as e:
+        log(f"❌ AI agent failed: {e}")
+        log(traceback.format_exc())
+        insights = {
+            "simulation": "AI unavailable – using fallback.",
+            "severity": "Medium",
+            "rollback": ["Revert changes", "Restart services"],
+            "validation": ["Check health endpoints"],
+            "tokens_used": {}
+        }
+
+    suggestions = (insights.get("rollback") or []) + (insights.get("validation") or [])
+
+    try:
+        save_commit_analysis(commit_sha, repo_name, branch, changed_files, blast, suggestions)
+        log(f"💾 Saved commit analysis for {commit_sha}")
+    except Exception as e:
+        log(f"❌ Database save failed: {e}")
+        log(traceback.format_exc())
+
+    # Inline comment posting is disabled for now: post_inline_comment's diff
+    # "position" is a simplification (file line number, not a true hunk offset),
+    # so on real multi-hunk diffs it can attach a comment to the wrong line in
+    # front of everyone on the PR. Leaving this off until position mapping is
+    # actually fixed — see get_pr_for_branch/fetch_commit_diff/post_inline_comment
+    # in github_client.py, which remain in place for when that's ready.
+    log(f"ℹ️  Inline comment posting is disabled pending an accurate diff-position mapping – skipping for commit {commit_sha}.")
+
 @app.post("/webhook")
 async def webhook(request: Request, background_tasks: BackgroundTasks):
     try:
@@ -218,7 +274,17 @@ async def webhook(request: Request, background_tasks: BackgroundTasks):
     if not isinstance(payload, dict):
         return {"status": "ignored"}
     if "pull_request" not in payload:
-        return {"status": "ignored"}
+        if "commits" not in payload and "ref" not in payload:
+            return {"status": "ignored"}
+        branch, repo_name, commit_sha, changed_files = parse_push_payload(payload)
+        if repo_name is None or commit_sha is None:
+            return {"status": "ignored"}
+        if is_commit_analyzed(commit_sha):
+            log(f"⏭️  Commit {commit_sha} already analyzed – skipping.")
+            return {"status": "already_analyzed"}
+        log(f"🔥 Push webhook received: commit {commit_sha} on {branch} in {repo_name}")
+        background_tasks.add_task(run_push_analysis_pipeline, commit_sha, repo_name, branch, changed_files)
+        return {"received": True}
     pr_number, repo_name, action = parse_payload(payload)
     if pr_number is None or repo_name is None or action != "opened":
         return {"status": "ignored"}
@@ -233,6 +299,10 @@ def list_analyses(limit: int = 50):
 @app.get("/api/analyses/{pr_number}")
 def read_pr_analysis(pr_number: int):
     return get_pr_analysis(pr_number)
+
+@app.get("/api/commit-analyses")
+def list_commit_analyses(limit: int = 50):
+    return get_all_commit_analyses(limit)
 
 @app.get("/api/metrics")
 def metrics():
