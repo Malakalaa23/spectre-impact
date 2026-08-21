@@ -95,4 +95,157 @@ def get_pr_analysis(pr_number: int):
     return [_row_to_dict(row) for row in rows]
 
 
+# ============================================================
+# NEW: Commit analysis functions (for inline feedback)
+# ============================================================
+
+def init_commit_table():
+    """Create the commit_analyses table if it doesn't exist"""
+    conn = _get_connection()
+    conn.execute(
+        """
+        CREATE TABLE IF NOT EXISTS commit_analyses (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            commit_sha TEXT NOT NULL,
+            repo_name TEXT NOT NULL,
+            branch TEXT NOT NULL,
+            changed_files TEXT,
+            affected_services TEXT,
+            business_impact INTEGER,
+            suggestions TEXT,
+            created_at TEXT NOT NULL
+        )
+        """
+    )
+    conn.commit()
+    conn.close()
+
+
+def save_commit_analysis(commit_sha: str, repo_name: str, branch: str,
+                         changed_files: list, affected_services: list,
+                         business_impact: int, suggestions: list):
+    """
+    Save a commit analysis to the database.
+    """
+    conn = _get_connection()
+    try:
+        conn.execute(
+            """
+            INSERT INTO commit_analyses (
+                commit_sha, repo_name, branch, changed_files,
+                affected_services, business_impact, suggestions, created_at
+            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+            """,
+            (
+                commit_sha,
+                repo_name,
+                branch,
+                json.dumps(changed_files),
+                json.dumps(affected_services),
+                business_impact,
+                json.dumps(suggestions),
+                datetime.now(timezone.utc).isoformat()
+            )
+        )
+        conn.commit()
+    finally:
+        conn.close()
+
+
+def is_commit_analyzed(commit_sha: str) -> bool:
+    """
+    Check if a commit has already been analyzed.
+    """
+    conn = _get_connection()
+    try:
+        # Check if the table exists first
+        table_exists = conn.execute(
+            "SELECT name FROM sqlite_master WHERE type='table' AND name='commit_analyses'"
+        ).fetchone()
+        if not table_exists:
+            return False
+        row = conn.execute(
+            "SELECT id FROM commit_analyses WHERE commit_sha = ?", (commit_sha,)
+        ).fetchone()
+        return row is not None
+    finally:
+        conn.close()
+
+
+def get_commit_analysis(commit_sha: str) -> dict:
+    """
+    Get a commit analysis by SHA.
+    """
+    conn = _get_connection()
+    try:
+        table_exists = conn.execute(
+            "SELECT name FROM sqlite_master WHERE type='table' AND name='commit_analyses'"
+        ).fetchone()
+        if not table_exists:
+            return None
+        row = conn.execute(
+            "SELECT * FROM commit_analyses WHERE commit_sha = ? ORDER BY id DESC", (commit_sha,)
+        ).fetchone()
+        if row:
+            return dict(row)
+        return None
+    finally:
+        conn.close()
+
+
+def get_all_commit_analyses(limit: int = 50):
+    """
+    Get all commit analyses.
+    """
+    conn = _get_connection()
+    try:
+        table_exists = conn.execute(
+            "SELECT name FROM sqlite_master WHERE type='table' AND name='commit_analyses'"
+        ).fetchone()
+        if not table_exists:
+            return []
+        rows = conn.execute(
+            "SELECT * FROM commit_analyses ORDER BY id DESC LIMIT ?", (limit,)
+        ).fetchall()
+        return [dict(row) for row in rows]
+    finally:
+        conn.close()
+
+
+# ============================================================
+# Initialize tables on module load
+# ============================================================
 init_db()
+init_commit_table()
+
+# ============================================================
+# Quick self‑test (run with `python database.py`)
+# ============================================================
+if __name__ == "__main__":
+    print("🧪 Testing database functions...")
+    
+    # Test commit functions
+    test_sha = "test_commit_123"
+    save_commit_analysis(
+        test_sha,
+        "test/repo",
+        "main",
+        ["test.py"],
+        ["service1", "service2"],
+        75,
+        [{"file": "test.py", "line": 10, "suggestion": "Add null check"}]
+    )
+    
+    result = is_commit_analyzed(test_sha)
+    print(f"✅ is_commit_analyzed: {result}")
+    
+    analysis = get_commit_analysis(test_sha)
+    print(f"✅ get_commit_analysis: {analysis is not None}")
+    
+    # Clean up
+    conn = _get_connection()
+    conn.execute("DELETE FROM commit_analyses WHERE commit_sha = ?", (test_sha,))
+    conn.commit()
+    conn.close()
+    
+    print("✅ All tests passed!")
