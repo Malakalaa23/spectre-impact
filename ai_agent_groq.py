@@ -1,8 +1,12 @@
+"""
+AI Agent for Spectre Impact – uses Groq API to generate insights.
+Location: C:/Users/Malak/spectre-impact/ai_agent_groq.py
+"""
+
 import os
 import json
 import logging
 import re
-import ast
 from typing import List, Dict, Any
 from dotenv import load_dotenv
 import groq
@@ -11,15 +15,14 @@ load_dotenv()
 
 GROQ_API_KEY = os.getenv("GROQ_API_KEY")
 
-# As of Aug 2026, these are confirmed active.
+# Models that are currently active and support JSON output
 MODELS = [
-    "openai/gpt-oss-120b",          # highest quality
-    "qwen/qwen3.6-27b",             # solid fallback
-    "canopylabs/orpheus-v1-english",# extra (needs terms acceptance)
+    "openai/gpt-oss-120b",      # best quality
+    "qwen/qwen3.6-27b",         # good fallback
 ]
 
 MAX_RETRIES = 1
-MAX_TOKENS = 800  # increased to avoid truncation
+MAX_TOKENS = 800
 
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
@@ -46,66 +49,50 @@ def _fallback_insights(services: List[str], impact: int) -> Dict[str, Any]:
     }
 
 # -------------------------------------------------------------------
-# Robust JSON extraction with automatic truncation repair
+# JSON extraction with truncation repair
 # -------------------------------------------------------------------
 def extract_json(text: str) -> Dict[str, Any]:
     """Extract a JSON object from mixed text, repairing truncated JSON if needed."""
-    # 1. Try to find a ```json ... ``` code block
-    code_block = re.search(r'```json\s*(\{.*?\})\s*```', text, re.DOTALL)
-    if code_block:
-        json_str = code_block.group(1)
-    else:
-        # 2. Try to find the first '{' and match braces (nested support)
-        start = text.find('{')
-        if start == -1:
-            raise ValueError("No JSON object found")
-        stack = 0
-        end = None
-        for i, ch in enumerate(text[start:], start):
-            if ch == '{':
-                stack += 1
-            elif ch == '}':
-                stack -= 1
-                if stack == 0:
-                    end = i + 1
-                    break
-        # If braces are unbalanced, we'll try to repair by appending missing '}'
-        if end is None:
-            # Count open braces minus close braces
-            open_braces = text[start:].count('{') - text[start:].count('}')
-            if open_braces > 0:
-                # Append the missing closing braces
-                json_str = text[start:] + '}' * open_braces
-                logger.warning(f"Repaired truncated JSON by adding {open_braces} closing brace(s).")
-            else:
-                raise ValueError("Unbalanced braces and cannot repair")
+    start = text.find('{')
+    if start == -1:
+        raise ValueError("No JSON object found")
+    
+    stack = 0
+    end = None
+    for i, ch in enumerate(text[start:], start):
+        if ch == '{':
+            stack += 1
+        elif ch == '}':
+            stack -= 1
+            if stack == 0:
+                end = i + 1
+                break
+    
+    if end is None:
+        open_braces = text[start:].count('{') - text[start:].count('}')
+        if open_braces > 0:
+            json_str = text[start:] + '}' * open_braces
+            logger.warning(f"Repaired truncated JSON by adding {open_braces} closing brace(s).")
         else:
-            json_str = text[start:end]
-
-    # 3. Try to parse as JSON (handles double quotes)
+            raise ValueError("Unbalanced braces and cannot repair")
+    else:
+        json_str = text[start:end]
+    
     try:
         return json.loads(json_str)
     except json.JSONDecodeError:
-        # 4. If that fails, try ast.literal_eval (handles single quotes)
-        try:
-            return ast.literal_eval(json_str)
-        except (SyntaxError, ValueError):
-            # 5. Last resort: replace single quotes with double quotes
-            try:
-                fixed = json_str.replace("'", '"')
-                return json.loads(fixed)
-            except:
-                raise ValueError(f"Could not parse JSON from: {json_str[:100]}...")
+        raise ValueError(f"Could not parse JSON from: {json_str[:100]}...")
 
 # -------------------------------------------------------------------
-# Main AI function
+# Main AI function for PR analysis
 # -------------------------------------------------------------------
 def generate_insights(services: List[str], business_impact: int) -> Dict[str, Any]:
     if not GROQ_API_KEY:
         logger.warning("❌ GROQ_API_KEY not set – using fallback.")
         return _fallback_insights(services, business_impact)
 
-    prompt = f"""You are a senior DevOps engineer reviewing a deployment change.
+    prompt = f"""
+You are a senior DevOps engineer reviewing a deployment change.
 
 Affected services: {', '.join(services) if services else 'None detected'}
 Business impact: {business_impact}% (estimated)
@@ -127,17 +114,15 @@ Example:
         for attempt in range(1, MAX_RETRIES + 1):
             try:
                 logger.info(f"🧠 Trying model {model} (attempt {attempt}) for: {services}")
-                # Try with response_format if the model supports it
                 try:
                     response = client.chat.completions.create(
                         model=model,
                         messages=[{"role": "user", "content": prompt}],
                         temperature=0.3,
                         max_tokens=MAX_TOKENS,
-                        response_format={"type": "json_object"}  # some models support this
+                        response_format={"type": "json_object"}
                     )
                 except Exception:
-                    # Fallback: some models don't support response_format
                     response = client.chat.completions.create(
                         model=model,
                         messages=[{"role": "user", "content": prompt}],
@@ -146,22 +131,13 @@ Example:
                     )
                 content = response.choices[0].message.content
 
-                # Debug: print raw response
-                print("\n" + "=" * 60)
-                print(f"📝 RAW RESPONSE from {model}:")
-                print(content)
-                print("=" * 60 + "\n")
-
-                # Extract JSON from the response
                 data = extract_json(content)
 
-                # Ensure required keys exist
                 required = ["simulation", "severity", "rollback", "validation"]
                 for key in required:
                     if key not in data:
                         data[key] = _fallback_insights(services, business_impact)[key]
 
-                # Add token usage
                 tokens_used = {
                     "input_tokens": getattr(response.usage, "prompt_tokens", 0),
                     "output_tokens": getattr(response.usage, "completion_tokens", 0),
@@ -180,8 +156,81 @@ Example:
     logger.warning("💾 All AI models failed – using fallback.")
     return _fallback_insights(services, business_impact)
 
+# -------------------------------------------------------------------
+# NEW: Inline AI prompt for commit analysis
+# -------------------------------------------------------------------
+def generate_inline_suggestions(diff: str, changed_files: list, affected_services: list) -> list:
+    """
+    Generate line‑specific suggestions based on the commit diff.
+    Returns: [
+        {"file": "app.py", "line": 42, "severity": "High", "suggestion": "Add null check"}
+    ]
+    """
+    if not affected_services or affected_services == ["unknown_service"]:
+        return []
+    
+    if not diff or len(diff) < 10:
+        return []
+    
+    if len(diff) > 8000:
+        diff = diff[:8000] + "\n... (truncated)"
+    
+    prompt = f"""
+You are a senior DevOps engineer reviewing code changes in real‑time.
+
+Changed files: {', '.join(changed_files)}
+Affected services: {', '.join(affected_services)}
+
+Here is the diff:
+{diff}
+
+Analyze these changes and return line‑specific feedback in JSON format:
+[
+    {{
+        "file": "path/to/file.py",
+        "line": 42,
+        "severity": "High",
+        "suggestion": "Add null check"
+    }}
+]
+
+RULES:
+1. ONLY return suggestions that are operational risks:
+   - Database migrations (backward compatibility)
+   - API changes (breaking changes)  
+   - Infrastructure changes (Terraform/K8s)
+   - Critical service dependencies
+2. Severity: ONLY use "High" or "Critical" (no Low/Medium for inline)
+3. Ignore style issues, formatting, or minor code quality concerns
+4. Return ONLY valid JSON array – no other text
+"""
+    
+    try:
+        client = groq.Groq(api_key=GROQ_API_KEY)
+        response = client.chat.completions.create(
+            model="llama-3.1-8b-instant",
+            messages=[{"role": "user", "content": prompt}],
+            temperature=0.2,
+            max_tokens=400,
+        )
+        content = response.choices[0].message.content
+        
+        suggestions = json.loads(content)
+        
+        filtered = []
+        for s in suggestions:
+            if s.get("severity", "").lower() in ("high", "critical"):
+                filtered.append(s)
+        
+        return filtered[:5]
+        
+    except Exception as e:
+        print(f"❌ AI inline suggestion failed: {e}")
+        return []
+
+# -------------------------------------------------------------------
+# Quick test
+# -------------------------------------------------------------------
 if __name__ == "__main__":
-    test_services = ["payment_service", "checkout_service", "login_service"]
-    result = generate_insights(test_services, 100)
-    print("\n✅ FINAL RESULT:")
+    result = generate_insights(["payment_service", "checkout_service"], 80)
     print(json.dumps(result, indent=2))
