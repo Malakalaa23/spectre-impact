@@ -35,3 +35,5 @@ typing_extensions==4.16.0
 urllib3==2.7.0
 uvicorn==0.52.4
 websockets==16.1.1
+plotly==6.4.0
+pandas==2.3.1
