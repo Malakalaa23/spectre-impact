@@ -1,5 +1,6 @@
 """
 AI Agent for Spectre Impact – uses Groq API to generate insights.
+Tries multiple models in order. Falls back to deterministic response if all fail.
 Location: C:/Users/Malak/spectre-impact/ai_agent_groq.py
 """
 
@@ -157,7 +158,7 @@ Example:
     return _fallback_insights(services, business_impact)
 
 # -------------------------------------------------------------------
-# NEW: Inline AI prompt for commit analysis
+# Inline AI prompt for commit analysis (with debugging)
 # -------------------------------------------------------------------
 def generate_inline_suggestions(diff: str, changed_files: list, affected_services: list) -> list:
     """
@@ -208,25 +209,61 @@ RULES:
     try:
         client = groq.Groq(api_key=GROQ_API_KEY)
         response = client.chat.completions.create(
-            model="llama-3.1-8b-instant",
+            model="openai/gpt-oss-120b",
             messages=[{"role": "user", "content": prompt}],
             temperature=0.2,
             max_tokens=400,
         )
-        content = response.choices[0].message.content
+        raw_content = response.choices[0].message.content
         
-        suggestions = json.loads(content)
+        # 🔍 DEBUG: Print the raw response to see what the AI returns
+        print("\n" + "=" * 60)
+        print("🔍 RAW AI RESPONSE:")
+        print(raw_content)
+        print("=" * 60 + "\n")
         
-        filtered = []
-        for s in suggestions:
-            if s.get("severity", "").lower() in ("high", "critical"):
-                filtered.append(s)
+        # Remove <think> tags
+        cleaned_content = re.sub(r'<think>.*?</think>', '', raw_content, flags=re.DOTALL)
+        cleaned_content = cleaned_content.strip()
         
-        return filtered[:5]
+        # Try to parse JSON
+        try:
+            suggestions = json.loads(cleaned_content)
+            if isinstance(suggestions, list):
+                filtered = _filter_suggestions(suggestions)
+                print(f"✅ Parsed {len(filtered)} suggestions from cleaned content")
+                return filtered
+        except json.JSONDecodeError:
+            pass
         
+        # Try to extract JSON array
+        match = re.search(r'\[\s*\{.*\}\s*\]', cleaned_content, re.DOTALL)
+        if match:
+            try:
+                suggestions = json.loads(match.group())
+                if isinstance(suggestions, list):
+                    filtered = _filter_suggestions(suggestions)
+                    print(f"✅ Parsed {len(filtered)} suggestions from regex match")
+                    return filtered
+            except json.JSONDecodeError:
+                pass
+        
+        print("⚠️ No valid JSON found in response")
+        return []
+    
     except Exception as e:
         print(f"❌ AI inline suggestion failed: {e}")
         return []
+
+def _filter_suggestions(suggestions: list) -> list:
+    """Filter to only High/Critical suggestions, limit to 5."""
+    filtered = []
+    for s in suggestions:
+        if isinstance(s, dict):
+            severity = s.get("severity", "").lower()
+            if severity in ("high", "critical"):
+                filtered.append(s)
+    return filtered[:5]
 
 # -------------------------------------------------------------------
 # Quick test
