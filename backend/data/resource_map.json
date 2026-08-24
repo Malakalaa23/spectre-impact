@@ -1,6 +1,7 @@
 {
   "customer_database": [
     "terraform/customer_database.tf",
+    "terraform/risky_db.tf",
     "test.txt"
   ],
   "redis_cache": [
