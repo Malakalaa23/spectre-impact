@@ -36,7 +36,7 @@ from github_client import post_github_comment, post_inline_comment, get_pr_for_b
 
 # Import AI agent
 try:
-    from ai_agent_groq import generate_insights, generate_inline_suggestions
+    from ai_agent_groq import generate_insights, generate_inline_suggestions, generate_code_review
     log("✅ AI agent imported successfully")
 except ImportError as e:
     log(f"⚠️ AI agent import failed: {e}")
@@ -50,6 +50,15 @@ except ImportError as e:
         }
     def generate_inline_suggestions(diff, changed_files, affected_services):
         return []
+    def generate_code_review(diff, changed_files, services):
+        return {
+            "code_quality": "Unable to Analyze",
+            "bugs_found": [],
+            "security_issues": [],
+            "missing_tests": [],
+            "suggestions": ["AI code review failed. Manual review recommended."],
+            "overall_verdict": "Manual Review Required"
+        }
     log("⚠️ Using fallback AI.")
 
 # Import cache
@@ -208,7 +217,7 @@ def fetch_changed_files(repo_full_name: str, pr_number: int) -> list:
         return []
 
 # -------------------------------------------------------------------
-# PR Analysis Pipeline (existing)
+# PR Analysis Pipeline
 # -------------------------------------------------------------------
 def run_analysis_pipeline(pr_number: int, repo_name: str, action: str):
     log(f"🚀 Pipeline started for PR #{pr_number} in {repo_name}")
@@ -222,6 +231,25 @@ def run_analysis_pipeline(pr_number: int, repo_name: str, action: str):
         log(f"❌ BFS failed: {e}")
         log(traceback.format_exc())
         return
+
+    # --- NEW: Get diff and run code review ---
+    diff = fetch_commit_diff(repo_name, str(pr_number))
+    log(f"📝 Diff fetched: {len(diff)} characters")
+    
+    try:
+        code_review = generate_code_review(diff, changed_files, blast.get("affected_services", []))
+        log(f"🔍 Code review: {code_review.get('overall_verdict', 'Unknown')}")
+    except Exception as e:
+        log(f"❌ Code review failed: {e}")
+        code_review = {
+            "code_quality": "Unable to Analyze",
+            "bugs_found": [],
+            "security_issues": [],
+            "missing_tests": [],
+            "suggestions": ["AI code review failed. Manual review recommended."],
+            "overall_verdict": "Manual Review Required"
+        }
+    # --- End of new code ---
 
     try:
         insights = generate_insights(blast["affected_services"], blast["business_impact"])
@@ -245,20 +273,20 @@ def run_analysis_pipeline(pr_number: int, repo_name: str, action: str):
         log(traceback.format_exc())
 
     try:
-        post_github_comment(pr_number, repo_name, blast, insights)
+        # --- Updated: Pass code_review to the comment ---
+        post_github_comment(pr_number, repo_name, blast, insights, code_review)
         log(f"📝 Comment posted to PR #{pr_number}")
     except Exception as e:
         log(f"❌ GitHub comment failed: {e}")
         log(traceback.format_exc())
 
 # -------------------------------------------------------------------
-# NEW: Commit Analysis Pipeline (for inline feedback)
+# Commit Analysis Pipeline
 # -------------------------------------------------------------------
 def run_commit_analysis(repo_name: str, commit_sha: str, branch: str, changed_files: list):
     log(f"🚀 Auto-analyzing commit {commit_sha[:7]} on {branch}")
     log(f"📄 Changed files: {changed_files}")
     
-    # 1. BFS – compute blast radius
     try:
         blast = calculate_blast_radius(changed_files)
         log(f"💥 Blast radius: {blast}")
@@ -267,13 +295,27 @@ def run_commit_analysis(repo_name: str, commit_sha: str, branch: str, changed_fi
         log(traceback.format_exc())
         return
     
-    # 2. Get diff for inline analysis
     diff = fetch_commit_diff(repo_name, commit_sha)
     if not diff:
         log("⚠️ No diff available – skipping inline analysis")
         return
     
-    # 3. Check cache for this diff
+    # --- NEW: Generate code review ---
+    try:
+        code_review = generate_code_review(diff, changed_files, blast.get("affected_services", []))
+        log(f"🔍 Code review: {code_review.get('overall_verdict', 'Unknown')}")
+    except Exception as e:
+        log(f"❌ Code review failed: {e}")
+        code_review = {
+            "code_quality": "Unable to Analyze",
+            "bugs_found": [],
+            "security_issues": [],
+            "missing_tests": [],
+            "suggestions": ["AI code review failed. Manual review recommended."],
+            "overall_verdict": "Manual Review Required"
+        }
+    # --- End of new code ---
+    
     diff_key = get_cache_key_for_diff(diff)
     cached_suggestions = get_cached_diff_suggestions(diff_key)
     
@@ -281,7 +323,6 @@ def run_commit_analysis(repo_name: str, commit_sha: str, branch: str, changed_fi
         log(f"📦 Using cached suggestions ({len(cached_suggestions)} items)")
         suggestions = cached_suggestions
     else:
-        # 4. AI – generate inline suggestions
         try:
             suggestions = generate_inline_suggestions(diff, changed_files, blast["affected_services"])
             log(f"💡 Generated {len(suggestions)} inline suggestions")
@@ -292,7 +333,6 @@ def run_commit_analysis(repo_name: str, commit_sha: str, branch: str, changed_fi
             log(traceback.format_exc())
             suggestions = []
     
-    # 5. Post inline comments
     if suggestions:
         for s in suggestions:
             try:
@@ -310,20 +350,19 @@ def run_commit_analysis(repo_name: str, commit_sha: str, branch: str, changed_fi
     else:
         log("💡 No inline suggestions generated")
     
-    # 6. Check if PR exists for this branch
     try:
         pr_number = get_pr_for_branch(repo_name, branch)
         if pr_number:
             log(f"🔍 Found PR #{pr_number} for this branch")
             insights = generate_insights(blast["affected_services"], blast["business_impact"])
-            post_github_comment(pr_number, repo_name, blast, insights)
+            # --- Updated: Pass code_review to the comment ---
+            post_github_comment(pr_number, repo_name, blast, insights, code_review)
             log(f"📝 Posted PR comment on #{pr_number}")
         else:
             log("ℹ️ No open PR found for this branch")
     except Exception as e:
         log(f"⚠️ PR comment failed: {e}")
     
-    # 7. Save to database
     try:
         save_commit_analysis(
             commit_sha, 
@@ -356,7 +395,6 @@ async def webhook(request: Request, background_tasks: BackgroundTasks):
     
     event_type = request.headers.get("X-GitHub-Event")
     
-    # NEW: Push event handler
     if event_type == "push":
         repo_name = payload["repository"]["full_name"]
         branch = payload["ref"].replace("refs/heads/", "")
