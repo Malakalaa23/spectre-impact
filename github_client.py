@@ -40,10 +40,8 @@ def format_analysis_comment(bfs_result: dict, ai_result: dict, code_review: dict
         f"- [ ] {step}" for step in ai_result.get("validation", [])
     ) or "- No validation steps provided."
 
-    # Simulation
     simulation = ai_result.get("simulation", "No simulation available.")
 
-    # Code Review Section
     code_review_section = ""
     if code_review:
         verdict = code_review.get("overall_verdict", "Unknown")
@@ -134,20 +132,29 @@ def get_pr_for_branch(repo_name: str, branch: str) -> int:
     Find if there's an open PR for this branch.
     Returns the PR number or None.
     """
+    if not GITHUB_TOKEN:
+        print("⚠️ GITHUB_TOKEN not set — skipping PR lookup.")
+        return None
+    
     try:
-        if not GITHUB_TOKEN:
-            print("⚠️ GITHUB_TOKEN not set — skipping PR lookup.")
-            return None
-
         gh = _get_github()
         repo = gh.get_repo(repo_name)
         owner = repo_name.split("/")[0]
-        pulls = repo.get_pulls(state="open", head=f"{owner}:{branch}")
+        
+        # Try with full head reference: owner:branch
+        head_ref = f"{owner}:{branch}"
+        pulls = repo.get_pulls(state='open', head=head_ref)
         for pr in pulls:
             return pr.number
+        
+        # If that fails, try just the branch name
+        pulls = repo.get_pulls(state='open')
+        for pr in pulls:
+            if pr.head.ref == branch:
+                return pr.number
         return None
     except Exception as e:
-        print(f"⚠️ Failed to look up PR for branch {branch}: {type(e).__name__}: {e}")
+        print(f"⚠️ PR detection failed: {type(e).__name__}: {e}")
         return None
 
 
@@ -179,8 +186,6 @@ def fetch_commit_diff(repo_name: str, commit_sha: str) -> str:
 def post_inline_comment(repo_name: str, commit_sha: str, file_path: str, line_number: int, suggestion: str, severity: str):
     """
     Post an inline comment on a specific line of a commit.
-    Note: GitHub's commit-comment API expects a diff "position" (an offset into
-    the patch hunk), not a file line number. This is a best-effort mapping.
     """
     try:
         if not GITHUB_TOKEN:
@@ -206,11 +211,11 @@ if __name__ == "__main__":
     print("🧪 Testing github_client functions...")
     
     # Test PR detection
-    pr_num = get_pr_for_branch("Malakalaa23/spectre-test", "main")
+    pr_num = get_pr_for_branch("Malakalaa23/spectre-impact", "feature/test-pr")
     print(f"✅ get_pr_for_branch: {pr_num}")
     
     # Test diff fetch
-    diff = fetch_commit_diff("Malakalaa23/spectre-test", "cfa39cd")
+    diff = fetch_commit_diff("Malakalaa23/spectre-impact", "dbfa8c6")
     print(f"✅ fetch_commit_diff: {len(diff)} characters")
     
     # Test comment formatting

@@ -4,3 +4,11 @@ __pycache__/
 *.pyc
 history.db
 *.log
+
+# Archive folder - not tracked in git
+_archive_*/
+
+# Audit tools and reports (local-only)
+audit_*.py
+audit_*_report.txt
+audit_report.txt

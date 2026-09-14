@@ -217,6 +217,35 @@ def fetch_changed_files(repo_full_name: str, pr_number: int) -> list:
         return []
 
 # -------------------------------------------------------------------
+# Get commit SHA from PR
+# -------------------------------------------------------------------
+def get_commit_sha_from_pr(repo_name: str, pr_number: int) -> str:
+    """
+    Get the latest commit SHA from a PR.
+    Returns the SHA string or None if not found.
+    """
+    if not GITHUB_TOKEN:
+        log("⚠️ GITHUB_TOKEN not set – cannot get commit SHA.")
+        return None
+    try:
+        auth = Auth.Token(GITHUB_TOKEN)
+        g = Github(auth=auth)
+        repo = g.get_repo(repo_name)
+        pr = repo.get_pull(pr_number)
+        # Get the latest commit from the PR
+        commits = pr.get_commits()
+        for commit in commits:
+            return commit.sha
+        log(f"⚠️ No commits found in PR #{pr_number}")
+        return None
+    except GithubException as e:
+        log(f"❌ GitHub API error getting commit SHA: {e}")
+        return None
+    except Exception as e:
+        log(f"❌ Unexpected error getting commit SHA: {e}")
+        return None
+
+# -------------------------------------------------------------------
 # PR Analysis Pipeline
 # -------------------------------------------------------------------
 def run_analysis_pipeline(pr_number: int, repo_name: str, action: str):
@@ -224,6 +253,7 @@ def run_analysis_pipeline(pr_number: int, repo_name: str, action: str):
     changed_files = fetch_changed_files(repo_name, pr_number)
     log(f"📄 Changed files: {changed_files}")
 
+    # 1. Calculate blast radius
     try:
         blast = calculate_blast_radius(changed_files)
         log(f"💥 Blast radius: {blast}")
@@ -232,15 +262,32 @@ def run_analysis_pipeline(pr_number: int, repo_name: str, action: str):
         log(traceback.format_exc())
         return
 
-    # --- NEW: Get diff and run code review ---
-    diff = fetch_commit_diff(repo_name, str(pr_number))
+    # 2. Get the actual commit SHA from the PR
+    commit_sha = get_commit_sha_from_pr(repo_name, pr_number)
+    log(f"📝 Commit SHA: {commit_sha}")
+
+    # 3. Fetch diff using the actual commit SHA
+    diff = ""
+    if commit_sha:
+        diff = fetch_commit_diff(repo_name, commit_sha)
+    else:
+        log("⚠️ No commit SHA found – skipping diff fetch")
     log(f"📝 Diff fetched: {len(diff)} characters")
-    
+
+    # --- DEBUG: Print diff content ---
+    log(f"🔍 DIFF CONTENT PREVIEW: {diff[:500] if diff else 'NO DIFF'}...")
+
+    # 4. Generate code review using the diff
     try:
+        log(f"🔍 Calling generate_code_review with diff length: {len(diff)}")
         code_review = generate_code_review(diff, changed_files, blast.get("affected_services", []))
-        log(f"🔍 Code review: {code_review.get('overall_verdict', 'Unknown')}")
+        log(f"🔍 Code review result: {code_review.get('overall_verdict', 'Unknown')}")
+        log(f"🔍 Code quality: {code_review.get('code_quality', 'Unknown')}")
+        log(f"🔍 Bugs found: {len(code_review.get('bugs_found', []))}")
+        log(f"🔍 Suggestions: {len(code_review.get('suggestions', []))}")
     except Exception as e:
         log(f"❌ Code review failed: {e}")
+        log(traceback.format_exc())
         code_review = {
             "code_quality": "Unable to Analyze",
             "bugs_found": [],
@@ -249,8 +296,8 @@ def run_analysis_pipeline(pr_number: int, repo_name: str, action: str):
             "suggestions": ["AI code review failed. Manual review recommended."],
             "overall_verdict": "Manual Review Required"
         }
-    # --- End of new code ---
 
+    # 5. Generate AI insights
     try:
         insights = generate_insights(blast["affected_services"], blast["business_impact"])
         log(f"🤖 Insights generated: {insights.get('severity', 'Unknown')}")
@@ -265,6 +312,7 @@ def run_analysis_pipeline(pr_number: int, repo_name: str, action: str):
             "tokens_used": {}
         }
 
+    # 6. Save to database
     try:
         save_analysis(pr_number, repo_name, blast, insights)
         log(f"💾 Saved analysis for PR #{pr_number}")
@@ -272,8 +320,8 @@ def run_analysis_pipeline(pr_number: int, repo_name: str, action: str):
         log(f"❌ Database save failed: {e}")
         log(traceback.format_exc())
 
+    # 7. Post GitHub comment
     try:
-        # --- Updated: Pass code_review to the comment ---
         post_github_comment(pr_number, repo_name, blast, insights, code_review)
         log(f"📝 Comment posted to PR #{pr_number}")
     except Exception as e:
@@ -300,7 +348,6 @@ def run_commit_analysis(repo_name: str, commit_sha: str, branch: str, changed_fi
         log("⚠️ No diff available – skipping inline analysis")
         return
     
-    # --- NEW: Generate code review ---
     try:
         code_review = generate_code_review(diff, changed_files, blast.get("affected_services", []))
         log(f"🔍 Code review: {code_review.get('overall_verdict', 'Unknown')}")
@@ -314,7 +361,6 @@ def run_commit_analysis(repo_name: str, commit_sha: str, branch: str, changed_fi
             "suggestions": ["AI code review failed. Manual review recommended."],
             "overall_verdict": "Manual Review Required"
         }
-    # --- End of new code ---
     
     diff_key = get_cache_key_for_diff(diff)
     cached_suggestions = get_cached_diff_suggestions(diff_key)
@@ -355,7 +401,6 @@ def run_commit_analysis(repo_name: str, commit_sha: str, branch: str, changed_fi
         if pr_number:
             log(f"🔍 Found PR #{pr_number} for this branch")
             insights = generate_insights(blast["affected_services"], blast["business_impact"])
-            # --- Updated: Pass code_review to the comment ---
             post_github_comment(pr_number, repo_name, blast, insights, code_review)
             log(f"📝 Posted PR comment on #{pr_number}")
         else:
@@ -424,7 +469,11 @@ async def webhook(request: Request, background_tasks: BackgroundTasks):
         return {"status": "ignored"}
     
     pr_number, repo_name, action = parse_payload(payload)
-    if pr_number is None or repo_name is None or action != "opened":
+    if pr_number is None or repo_name is None:
+        return {"status": "ignored"}
+    
+    # Handle both "opened" and "reopened" events
+    if action not in ["opened", "reopened"]:
         return {"status": "ignored"}
     
     log(f"🔥 Webhook received: PR #{pr_number}, {repo_name}, action={action}")
