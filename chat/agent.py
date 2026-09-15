@@ -23,6 +23,7 @@ import logging
 from typing import Any
 
 from langchain.agents import create_agent
+from langchain_core.messages import AIMessage, HumanMessage, SystemMessage
 from langchain_core.tools import BaseTool
 from langchain_groq import ChatGroq
 
@@ -75,8 +76,8 @@ def build_agent(tools: list[BaseTool] | None = None):
 
     Returns:
         A compiled LangGraph agent. Invoke it with:
-            await agent.ainvoke({"messages": [{"role": "user", "content": "..."}]})
-        The final reply is in result["messages"][-1].content.
+            await agent.ainvoke({"messages": [...]})
+        where [...] is a list of LangChain message objects.
     """
     if tools is None:
         tools = list(ALL_TOOLS)
@@ -91,6 +92,60 @@ def build_agent(tools: list[BaseTool] | None = None):
     return agent
 
 
+# ---------------------------------------------------------------------------
+# Message conversion
+# ---------------------------------------------------------------------------
+def _to_message(turn: dict[str, Any]):
+    """
+    Convert a stored history turn into the proper LangChain message type.
+
+    LangGraph's agent expects real message objects — HumanMessage,
+    AIMessage, SystemMessage — not plain dicts. Passing dicts causes the
+    agent to silently drop history and behave as if the conversation
+    just started.
+
+    Args:
+        turn: A dict like {"role": "user"|"assistant"|"system",
+                           "content": "..."}
+
+    Returns:
+        A LangChain message object.
+    """
+    role = (turn.get("role") or "user").lower()
+    content = turn.get("content") or ""
+
+    if role == "assistant":
+        return AIMessage(content=content)
+    if role == "system":
+        return SystemMessage(content=content)
+    return HumanMessage(content=content)
+
+
+def _build_messages(
+    message: str,
+    history: list[dict[str, Any]] | None,
+):
+    """
+    Build the full message list for one agent invocation.
+
+    Order:
+        1. Prior turns from history (as message objects)
+        2. The current user message
+
+    The system prompt is not included here — `create_agent` injects it
+    from the `system_prompt` parameter automatically.
+    """
+    messages = []
+    for turn in history or []:
+        if isinstance(turn, dict) and turn.get("content"):
+            messages.append(_to_message(turn))
+    messages.append(HumanMessage(content=message))
+    return messages
+
+
+# ---------------------------------------------------------------------------
+# Public chat function
+# ---------------------------------------------------------------------------
 async def chat(
     message: str,
     history: list[dict[str, Any]] | None = None,
@@ -111,15 +166,7 @@ async def chat(
             - "tool_calls": list of tool names that were invoked (may be empty)
     """
     agent = build_agent(tools)
-
-    # Build the message list: prior turns first, then the current message.
-    messages: list[dict[str, str]] = []
-    for turn in history or []:
-        role = turn.get("role", "user")
-        content = turn.get("content", "")
-        if role in ("user", "assistant", "system"):
-            messages.append({"role": role, "content": content})
-    messages.append({"role": "user", "content": message})
+    messages = _build_messages(message, history)
 
     try:
         result = await agent.ainvoke({"messages": messages})
@@ -137,6 +184,9 @@ async def chat(
     }
 
 
+# ---------------------------------------------------------------------------
+# Result extraction
+# ---------------------------------------------------------------------------
 def _extract_final_text(result: dict[str, Any]) -> str:
     """
     Pull the final assistant text out of the LangGraph result.
@@ -180,7 +230,6 @@ def _extract_tool_calls(result: dict[str, Any]) -> list[str]:
         calls = getattr(msg, "tool_calls", None)
         if calls:
             for call in calls:
-                # LangChain tool calls have either {"name": ...} or .name
                 if isinstance(call, dict):
                     if name := call.get("name"):
                         names.append(name)
