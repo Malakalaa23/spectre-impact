@@ -12,3 +12,11 @@ _archive_*/
 audit_*.py
 audit_*_report.txt
 audit_report.txt
+
+# Local dev files
+dump_*.py
+dump_*.txt
+*.bak
+test_*.mp3
+audit_*.py
+audit_*.txt
