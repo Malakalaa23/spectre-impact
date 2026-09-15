@@ -20,3 +20,5 @@ dump_*.txt
 test_*.mp3
 audit_*.py
 audit_*.txt
+
+diagnose_*.py
