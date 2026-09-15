@@ -1,31 +1,116 @@
-services:
-  payment_service:
-    dependencies:
-      - resource: customer_database
-  checkout_service:
-    dependencies:
-      - resource: customer_database
-  login_service:
-    dependencies:
-      - resource: customer_database
-  profile_service:
-    dependencies:
-      - resource: customer_database
-  login_api:
-    dependencies:
-      - resource: customer_database
+nodes:
   checkout_api:
-    dependencies:
-      - resource: customer_database
-  profile_api:
-    dependencies:
-      - resource: customer_database
-  login_journey:
-    dependencies:
-      - resource: customer_database
+    children:
+    - web_frontend
+    - mobile_app
+    criticality: critical
+    owner: payments-team
+    type: api
   checkout_journey:
-    dependencies:
-      - resource: customer_database
+    children:
+    - customer_retention
+    - customer_satisfaction
+    - revenue_generation
+    criticality: critical
+    owner: product-team
+    type: customer_journey
+  checkout_service:
+    children:
+    - checkout_api
+    criticality: critical
+    owner: payments-team
+    type: service
+  customer_database:
+    children:
+    - login_service
+    - checkout_service
+    - payment_service
+    - profile_service
+    criticality: critical
+    owner: platform-team
+    type: database
+  customer_retention:
+    children: []
+    criticality: high
+    owner: management
+    type: business
+  customer_satisfaction:
+    children: []
+    criticality: medium
+    owner: management
+    type: business
+  login_api:
+    children:
+    - web_frontend
+    - mobile_app
+    criticality: critical
+    owner: identity-team
+    type: api
+  login_journey:
+    children:
+    - customer_retention
+    - customer_satisfaction
+    - revenue_generation
+    criticality: critical
+    owner: product-team
+    type: customer_journey
+  login_service:
+    children:
+    - login_api
+    - checkout_api
+    criticality: critical
+    owner: identity-team
+    type: service
+  mobile_app:
+    children:
+    - login_journey
+    - checkout_journey
+    criticality: high
+    owner: mobile-team
+    type: mobile_app
+  payment_service:
+    children:
+    - checkout_api
+    criticality: critical
+    owner: payments-team
+    type: service
+  profile_api:
+    children:
+    - web_frontend
+    criticality: high
+    owner: identity-team
+    type: api
   profile_journey:
-    dependencies:
-      - resource: customer_database
+    children:
+    - customer_retention
+    - customer_satisfaction
+    - revenue_generation
+    criticality: medium
+    owner: product-team
+    type: customer_journey
+  profile_service:
+    children:
+    - profile_api
+    criticality: high
+    owner: identity-team
+    type: service
+  redis_cache:
+    children:
+    - login_service
+    - profile_service
+    criticality: high
+    owner: platform-team
+    type: cache
+  revenue_generation:
+    children: []
+    criticality: critical
+    owner: management
+    type: business
+  web_frontend:
+    children:
+    - login_journey
+    - checkout_journey
+    - profile_journey
+    criticality: high
+    owner: frontend-team
+    type: frontend
