@@ -1,16 +1,17 @@
 """
 agent.py — The Lya chat agent (LangChain 1.x).
 
-This module builds a LangChain 1.x agent using `langchain.agents.create_agent`,
-which returns a compiled LangGraph. The agent uses Lya's personality
-(from `chat.prompts`) and a set of tools (from `chat.tools`) to answer
-developer questions about the Spectre Impact system.
+Builds a LangChain 1.x agent using `langchain.agents.create_agent`, which
+returns a compiled LangGraph. The agent uses Lya's personality (from
+`chat.prompts`) and the tools from `chat.tools`.
 
-By default, the agent is given every tool in `chat.tools.ALL_TOOLS`.
-Callers may override this to run tool-less (useful for tests).
-
-The agent is stateless by design. Conversation memory (Redis-backed) is
-handled by a higher layer so that tests can run without a Redis connection.
+Runtime guard:
+    Before invoking the LLM, `chat()` checks whether the user's message
+    looks like an orphan follow-up — a short question that references
+    prior context ("those", "that", "which of them") — while the session
+    has no history. If so, it returns a clarification request without
+    calling the LLM. This guarantees the behavior even if the model
+    would otherwise answer from generic knowledge.
 
 Public API:
     build_agent(tools=None)  — construct a fresh agent graph.
@@ -20,6 +21,7 @@ Public API:
 from __future__ import annotations
 
 import logging
+import re
 from typing import Any
 
 from langchain.agents import create_agent
@@ -38,25 +40,85 @@ logger = logging.getLogger(__name__)
 # ---------------------------------------------------------------------------
 # Model configuration
 # ---------------------------------------------------------------------------
-# Groq is our primary provider — fast and cheap. Model choice is centralized
-# here so we can swap it without touching agent logic.
-#
-# Model history:
-#   - "llama-3.3-70b-versatile"  → deprecated by Groq (404 as of Sept 2026)
-#   - "openai/gpt-oss-120b"      → current choice. GPT-4-class, native tool
-#                                   calling, 120B params, fast on Groq's LPU.
-#                                   This is the biggest model on our Groq key.
 DEFAULT_MODEL = "openai/gpt-oss-120b"
 DEFAULT_TEMPERATURE = 0
 
 
-def _build_llm() -> ChatGroq:
-    """
-    Create the Groq chat model client.
+# ---------------------------------------------------------------------------
+# Orphan follow-up detection
+# ---------------------------------------------------------------------------
+# The pattern catches short messages that clearly reference prior context
+# while the session has no history. We deliberately err on the side of
+# NOT triggering — false negatives are better than false positives.
+#
+# Triggers when ALL of these hold:
+#   1. No conversation history in the session.
+#   2. The message has ≤ 20 words (short).
+#   3. The message contains at least one referential word or phrase.
 
-    Reads GROQ_API_KEY from the environment via the shared config helper.
-    Raises ValueError if the key is missing.
+_REFERENTIAL_PATTERNS = [
+    r"\bthose\b",
+    r"\bthem\b",
+    r"\bthat\b",
+    r"\bthese\b",
+    r"\bthe same\b",
+    r"\bwhich of\b",
+    r"\bof those\b",
+    r"\bpreviously\b",
+    r"\bearlier\b",
+    r"\babove\b",
+    r"\bthe (?:one|list|above)\b",
+    # Egyptian Arabic equivalents
+    r"دول",
+    r"ده",
+    r"دي",
+    r"اللي فات",
+    r"اللي قلته",
+    r"اللي قلتيه",
+    r"إيه أخطرهم",
+    r"أي واحدة فيهم",
+]
+
+
+def _looks_like_orphan_followup(message: str, history: list[dict[str, Any]] | None) -> bool:
     """
+    Return True if the message looks like an orphan follow-up.
+
+    An orphan follow-up is a short question that references prior context
+    ("those", "them", "that") while the session has no history. In that
+    case, the correct response is to ask for clarification, not to invent
+    an answer.
+    """
+    if history:
+        return False  # session has context, don't block
+
+    text = (message or "").strip()
+    if not text:
+        return False
+
+    # Short messages only
+    if len(text.split()) > 20:
+        return False
+
+    lowered = text.lower()
+    for pattern in _REFERENTIAL_PATTERNS:
+        if re.search(pattern, lowered):
+            return True
+    return False
+
+
+_ORPHAN_REFUSAL = (
+    "I don't have prior context in this session — which services or files "
+    "are you asking about? Share the file path, PR number, or service name, "
+    "and I'll analyze it for you."
+)
+
+
+# ---------------------------------------------------------------------------
+# Model + prompt building
+# ---------------------------------------------------------------------------
+def _build_llm() -> ChatGroq:
+    """Create the Groq chat model client."""
     api_key = get_env("GROQ_API_KEY")
     return ChatGroq(
         api_key=api_key,
@@ -66,24 +128,11 @@ def _build_llm() -> ChatGroq:
 
 
 def build_agent(tools: list[BaseTool] | None = None):
-    """
-    Construct a fresh agent graph with the given tools.
-
-    Args:
-        tools: The list of LangChain tools the agent can call.
-               If None, defaults to `chat.tools.ALL_TOOLS`.
-               Pass an empty list to build a tool-less agent (for tests).
-
-    Returns:
-        A compiled LangGraph agent. Invoke it with:
-            await agent.ainvoke({"messages": [...]})
-        where [...] is a list of LangChain message objects.
-    """
+    """Construct a fresh agent graph with the given tools."""
     if tools is None:
         tools = list(ALL_TOOLS)
 
     llm = _build_llm()
-
     agent = create_agent(
         model=llm,
         tools=tools,
@@ -96,21 +145,7 @@ def build_agent(tools: list[BaseTool] | None = None):
 # Message conversion
 # ---------------------------------------------------------------------------
 def _to_message(turn: dict[str, Any]):
-    """
-    Convert a stored history turn into the proper LangChain message type.
-
-    LangGraph's agent expects real message objects — HumanMessage,
-    AIMessage, SystemMessage — not plain dicts. Passing dicts causes the
-    agent to silently drop history and behave as if the conversation
-    just started.
-
-    Args:
-        turn: A dict like {"role": "user"|"assistant"|"system",
-                           "content": "..."}
-
-    Returns:
-        A LangChain message object.
-    """
+    """Convert a stored history turn into a LangChain message object."""
     role = (turn.get("role") or "user").lower()
     content = turn.get("content") or ""
 
@@ -121,20 +156,8 @@ def _to_message(turn: dict[str, Any]):
     return HumanMessage(content=content)
 
 
-def _build_messages(
-    message: str,
-    history: list[dict[str, Any]] | None,
-):
-    """
-    Build the full message list for one agent invocation.
-
-    Order:
-        1. Prior turns from history (as message objects)
-        2. The current user message
-
-    The system prompt is not included here — `create_agent` injects it
-    from the `system_prompt` parameter automatically.
-    """
+def _build_messages(message: str, history: list[dict[str, Any]] | None):
+    """Build the message list for one agent invocation."""
     messages = []
     for turn in history or []:
         if isinstance(turn, dict) and turn.get("content"):
@@ -154,23 +177,24 @@ async def chat(
     """
     Send one message to Lya and return her response.
 
-    Args:
-        message: The user's message text.
-        history: Optional list of prior messages in
-                 {"role": "user"|"assistant", "content": "..."} format.
-        tools:   Optional list of tools. If None, uses ALL_TOOLS.
-
-    Returns:
-        A dict with:
-            - "response": Lya's text reply
-            - "tool_calls": list of tool names that were invoked (may be empty)
+    Includes a runtime guard: if the message looks like an orphan
+    follow-up (references prior context, but history is empty), the
+    guard returns a clarification request without invoking the LLM.
     """
+    # Runtime guard — catch orphan follow-ups before they reach the LLM
+    if _looks_like_orphan_followup(message, history):
+        logger.info("Orphan follow-up detected — returning clarification")
+        return {
+            "response": _ORPHAN_REFUSAL,
+            "tool_calls": [],
+        }
+
     agent = build_agent(tools)
     messages = _build_messages(message, history)
 
     try:
         result = await agent.ainvoke({"messages": messages})
-    except Exception as exc:  # noqa: BLE001 — surface any agent error
+    except Exception as exc:  # noqa: BLE001
         logger.exception("Agent invocation failed")
         return {
             "response": "I ran into a problem handling that. Please try again.",
@@ -188,13 +212,7 @@ async def chat(
 # Result extraction
 # ---------------------------------------------------------------------------
 def _extract_final_text(result: dict[str, Any]) -> str:
-    """
-    Pull the final assistant text out of the LangGraph result.
-
-    LangChain 1.x returns {"messages": [...]} where the last message is
-    the assistant's reply. Its .content may be a string or a list of
-    content blocks (for models that emit structured output).
-    """
+    """Pull the final assistant text out of the LangGraph result."""
     messages = result.get("messages") or []
     if not messages:
         return ""
@@ -205,7 +223,6 @@ def _extract_final_text(result: dict[str, Any]) -> str:
     if isinstance(content, str):
         return content
 
-    # Some models return a list of content blocks: [{"type": "text", "text": "..."}]
     if isinstance(content, list):
         parts: list[str] = []
         for block in content:
@@ -219,12 +236,7 @@ def _extract_final_text(result: dict[str, Any]) -> str:
 
 
 def _extract_tool_calls(result: dict[str, Any]) -> list[str]:
-    """
-    Collect the names of tools that were called during the agent run.
-
-    Walks the message list, picking up any message with tool_call blocks
-    or an AIMessage that carries .tool_calls.
-    """
+    """Collect the names of tools that were called during the agent run."""
     names: list[str] = []
     for msg in result.get("messages") or []:
         calls = getattr(msg, "tool_calls", None)
