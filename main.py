@@ -10,13 +10,14 @@ Endpoints:
     GET  /api/metrics             — aggregate metrics.
     POST /api/chat                — Lya chat endpoint.
     POST /api/chat/clear          — clear a session's history.
+    POST /api/tts                 — text-to-speech (MP3 output).
 
 Design notes:
-    - The BFS logic now delegates to backend.analysis.change_analysis_engine
-      .analyze_impact(), which is the single source of truth. The old inline
-      BFS in this file was removed to avoid duplication and schema drift.
-    - The chat endpoints use chat.agent + chat.memory. They degrade
-      gracefully if those modules are missing.
+    - The BFS logic delegates to backend.analysis.change_analysis_engine
+      .analyze_impact(), the single source of truth for the analysis engine.
+    - The chat endpoints use chat.agent + chat.memory.
+    - The TTS endpoint uses ai.tts (Edge TTS, English + Egyptian Arabic).
+    - Every optional module degrades gracefully if unavailable.
 """
 
 import sys
@@ -29,11 +30,12 @@ from datetime import datetime, timezone
 from typing import Any
 
 from fastapi import BackgroundTasks, FastAPI, Request, HTTPException
+from fastapi.responses import Response
 from pydantic import BaseModel, Field
 from dotenv import load_dotenv
 from github import Github, GithubException, Auth
 
-# Force UTF-8 for Windows
+# Force UTF-8 on Windows
 try:
     sys.stdout.reconfigure(encoding="utf-8")
 except Exception:
@@ -174,6 +176,17 @@ except ImportError:
     def sanitize_output(text): return text
 
 
+# Text-to-speech (Edge TTS based)
+try:
+    from ai.tts import synthesize_async as tts_synthesize
+    log("✅ TTS module imported")
+except ImportError as e:
+    log(f"⚠️ TTS module import failed: {e}")
+
+    async def tts_synthesize(text, language="auto", voice=None):
+        raise RuntimeError("TTS module not available")
+
+
 # -------------------------------------------------------------------
 # Blast radius — delegates to the real engine
 # -------------------------------------------------------------------
@@ -183,7 +196,7 @@ def calculate_blast_radius(changed_files: list[str]) -> dict[str, Any]:
 
     Delegates to backend.analysis.change_analysis_engine.analyze_impact —
     the single source of truth used by the chat tools and the code review
-    pipeline. This replaces the old inline BFS that duplicated the logic.
+    pipeline.
     """
     if not changed_files:
         return {
@@ -231,6 +244,12 @@ class ChatResponse(BaseModel):
     tool_calls: list[str] = []
 
 
+class TTSRequest(BaseModel):
+    text: str = Field(..., min_length=1, max_length=2000)
+    language: str = Field("auto", pattern="^(auto|ar|en)$")
+    voice: str | None = None
+
+
 # -------------------------------------------------------------------
 # Health
 # -------------------------------------------------------------------
@@ -262,31 +281,25 @@ async def chat_endpoint(req: ChatRequest) -> ChatResponse:
     """
     log(f"💬 /api/chat session={req.session_id} len={len(req.message)}")
 
-    # 1. Sanitize input
     try:
         clean_message = sanitize_input(req.message)
     except ValueError as exc:
         log(f"🚫 Blocked input in {req.session_id}: {exc}")
         raise HTTPException(status_code=400, detail="Invalid input.") from exc
 
-    # 2. Load history
     history = get_history(req.session_id)
 
-    # 3. Call agent
     try:
         result = await lya_chat(clean_message, history=history)
     except Exception as exc:
         log(f"❌ Chat failed: {exc}\n{traceback.format_exc()}")
         raise HTTPException(status_code=500, detail="Chat failed.") from exc
 
-    # 4. Save to memory
     save_message(req.session_id, "user", clean_message)
     save_message(req.session_id, "assistant", result.get("response", ""))
 
-    # 5. Sanitize output
     safe_response = sanitize_output(result.get("response", ""))
 
-    # 6. Return
     return ChatResponse(
         response=safe_response,
         session_id=req.session_id,
@@ -300,6 +313,49 @@ async def chat_clear(session_id: str) -> dict[str, Any]:
     clear_session(session_id)
     log(f"🧹 Cleared session {session_id}")
     return {"status": "cleared", "session_id": session_id}
+
+
+# -------------------------------------------------------------------
+# Text-to-speech endpoint
+# -------------------------------------------------------------------
+@app.post("/api/tts")
+async def tts_endpoint(req: TTSRequest):
+    """
+    Convert text to speech and return MP3 audio bytes.
+
+    Content-Type: audio/mpeg
+    Body: raw MP3 bytes.
+
+    Frontend usage:
+        response = requests.post(
+            "http://localhost:8000/api/tts",
+            json={"text": "...", "language": "auto"},
+        )
+        st.audio(response.content, format="audio/mp3")
+    """
+    log(f"🔊 /api/tts lang={req.language} chars={len(req.text)}")
+
+    try:
+        audio_bytes = await tts_synthesize(
+            req.text,
+            language=req.language,
+            voice=req.voice,
+        )
+    except Exception as exc:
+        log(f"❌ TTS failed: {exc}\n{traceback.format_exc()}")
+        raise HTTPException(status_code=500, detail=f"TTS failed: {exc}") from exc
+
+    if not audio_bytes:
+        raise HTTPException(status_code=500, detail="TTS produced empty audio")
+
+    return Response(
+        content=audio_bytes,
+        media_type="audio/mpeg",
+        headers={
+            "Content-Disposition": 'inline; filename="lya.mp3"',
+            "Cache-Control": "no-store",
+        },
+    )
 
 
 # -------------------------------------------------------------------
@@ -352,7 +408,7 @@ def get_commit_sha_from_pr(repo_name: str, pr_number: int) -> str | None:
 
 
 # -------------------------------------------------------------------
-# PR analysis pipeline (unchanged logic, uses new calculate_blast_radius)
+# PR analysis pipeline
 # -------------------------------------------------------------------
 def run_analysis_pipeline(pr_number: int, repo_name: str, action: str) -> None:
     log(f"🚀 Pipeline started for PR #{pr_number} in {repo_name}")
@@ -415,7 +471,7 @@ def run_analysis_pipeline(pr_number: int, repo_name: str, action: str) -> None:
 
 
 # -------------------------------------------------------------------
-# Commit analysis pipeline (unchanged)
+# Commit analysis pipeline
 # -------------------------------------------------------------------
 def run_commit_analysis(repo_name: str, commit_sha: str, branch: str, changed_files: list) -> None:
     log(f"🚀 Auto-analyzing commit {commit_sha[:7]} on {branch}")
