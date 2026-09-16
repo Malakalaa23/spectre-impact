@@ -22,3 +22,4 @@ audit_*.py
 audit_*.txt
 
 diagnose_*.py
+tts_*.mp3
