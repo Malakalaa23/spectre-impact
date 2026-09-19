@@ -1,0 +1,1 @@
+"""Spectre Impact RAG system (ChromaDB + OpenAI embeddings)."""
