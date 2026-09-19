@@ -23,3 +23,6 @@ audit_*.txt
 
 diagnose_*.py
 tts_*.mp3
+
+# Throwaway analysis scripts
+analyze_*.py
