@@ -1,0 +1,1 @@
+"""Spectre command-line interface."""

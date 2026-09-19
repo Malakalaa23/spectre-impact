@@ -1,0 +1,9 @@
+diff --git a/test.py b/test.py
+--- a/test.py
++++ b/test.py
+@@ -1,4 +1,5 @@
+ import hashlib
+ 
+ def process(data):
++    password = "secret123"
+     return data

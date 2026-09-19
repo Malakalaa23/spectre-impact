@@ -1,0 +1,50 @@
+# Estimated percentage of users affected when a component is unavailable.
+# The engine uses the maximum value among all affected nodes (worst case).
+customer_database:
+  feature: Customer accounts and payments
+  users_percentage: 100
+redis_cache:
+  feature: Session and authentication cache
+  users_percentage: 80
+login_service:
+  feature: User authentication
+  users_percentage: 100
+payment_service:
+  feature: Payment processing
+  users_percentage: 85
+profile_service:
+  feature: Customer profile management
+  users_percentage: 90
+login_api:
+  feature: Login API
+  users_percentage: 100
+checkout_api:
+  feature: Checkout API
+  users_percentage: 85
+profile_api:
+  feature: Profile API
+  users_percentage: 90
+web_frontend:
+  feature: Web application
+  users_percentage: 95
+mobile_app:
+  feature: Mobile application
+  users_percentage: 70
+login_journey:
+  feature: User sign-in
+  users_percentage: 100
+checkout_journey:
+  feature: Checkout
+  users_percentage: 85
+profile_journey:
+  feature: Profile updates
+  users_percentage: 90
+customer_retention:
+  feature: Customer retention
+  users_percentage: 90
+revenue_generation:
+  feature: Revenue generation
+  users_percentage: 85
+customer_satisfaction:
+  feature: Customer satisfaction
+  users_percentage: 90

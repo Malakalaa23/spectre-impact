@@ -1,0 +1,171 @@
+# ============================================================
+# Spectre Impact - Manual Impact Map (MVP)
+#
+# A node represents any component that can be affected by a
+# deployment or infrastructure change.
+#
+# Every node contains:
+#   type         -> What kind of component it is
+#   owner        -> Responsible team
+#   criticality  -> low | medium | high | critical
+#   children     -> Components that depend on this node
+#
+# Impact always flows DOWN.
+#
+# Example:
+#
+# Database
+#     ↓
+# Service
+#     ↓
+# API
+#     ↓
+# Frontend
+#     ↓
+# Customer Journey
+#     ↓
+# Business Capability
+#
+# ============================================================
+
+nodes:
+
+  ############################################################
+  # Infrastructure
+  ############################################################
+
+  customer_database:
+    type: database
+    owner: backend-team
+    criticality: critical
+    children:
+      - login_service
+      - payment_service
+      - profile_service
+
+  redis_cache:
+    type: cache
+    owner: backend-team
+    criticality: medium
+    children:
+      - login_service
+
+  ############################################################
+  # Services
+  ############################################################
+
+  login_service:
+    type: service
+    owner: backend-team
+    criticality: high
+    children:
+      - login_api
+
+  payment_service:
+    type: service
+    owner: payments-team
+    criticality: critical
+    children:
+      - checkout_api
+
+  profile_service:
+    type: service
+    owner: backend-team
+    criticality: medium
+    children:
+      - profile_api
+
+  ############################################################
+  # APIs
+  ############################################################
+
+  login_api:
+    type: api
+    owner: backend-team
+    criticality: high
+    children:
+      - web_frontend
+      - mobile_app
+
+  checkout_api:
+    type: api
+    owner: payments-team
+    criticality: critical
+    children:
+      - web_frontend
+      - mobile_app
+
+  profile_api:
+    type: api
+    owner: backend-team
+    criticality: medium
+    children:
+      - web_frontend
+
+  ############################################################
+  # Applications
+  ############################################################
+
+  web_frontend:
+    type: frontend
+    owner: frontend-team
+    criticality: high
+    children:
+      - login_journey
+      - checkout_journey
+      - profile_journey
+
+  mobile_app:
+    type: mobile_app
+    owner: mobile-team
+    criticality: high
+    children:
+      - login_journey
+      - checkout_journey
+
+  ############################################################
+  # Customer Journeys
+  ############################################################
+
+  login_journey:
+    type: customer_journey
+    owner: product-team
+    criticality: critical
+    children:
+      - customer_retention
+
+  checkout_journey:
+    type: customer_journey
+    owner: product-team
+    criticality: critical
+    children:
+      - revenue_generation
+
+  profile_journey:
+    type: customer_journey
+    owner: product-team
+    criticality: medium
+    children:
+      - customer_satisfaction
+
+  ############################################################
+  # Business Capabilities
+  ############################################################
+
+  customer_retention:
+    type: business
+    owner: management
+    criticality: high
+    children: []
+
+  revenue_generation:
+    type: business
+    owner: management
+    criticality: critical
+    children: []
+
+  customer_satisfaction:
+    type: business
+    owner: management
+    criticality: medium
+    children: []
