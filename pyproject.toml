@@ -1,0 +1,46 @@
+[build-system]
+requires = ["setuptools>=68"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "spectre-impact"
+version = "1.0.0"
+description = "AI-powered GitHub change intelligence and DevOps blast-radius analysis"
+requires-python = ">=3.10"
+dependencies = [
+    "pydantic>=2.0",
+    "PyYAML>=6.0",
+    "networkx>=3.0",
+    "matplotlib>=3.7",
+    "fastapi>=0.115",
+    "uvicorn[standard]>=0.30",
+    "typer>=0.16",
+    "rich>=13.9",
+    "openai>=1.100",
+    "groq>=0.30",
+    "anthropic>=0.70",
+    "chromadb>=1.0",
+]
+
+[project.scripts]
+spectre = "cli.main:app"
+
+[tool.setuptools.packages.find]
+include = [
+    "backend",
+    "backend.*",
+    "cli",
+    "cli.*",
+    "code_review",
+    "code_review.*",
+    "rag",
+    "rag.*",
+    "voice",
+    "voice.*",
+]
+
+[tool.setuptools]
+py-modules = ["ai_agent_groq"]
+
+[tool.pytest.ini_options]
+testpaths = ["backend", "tests"]

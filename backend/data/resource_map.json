@@ -1,36 +1,16 @@
 {
-  "customer_database": [
-    "terraform/customer_database.tf",
-    "test.txt"
-  ],
-  "redis_cache": [
-    "terraform/redis.tf"
-  ],
-  "login_service": [
-    "services/login/app.py"
-  ],
-  "payment_service": [
-    "services/payment/app.py"
-  ],
-  "profile_service": [
-    "services/profile/app.py"
-  ],
-  "login_api": [
-    "apis/login.py"
-  ],
-  "checkout_api": [
-    "apis/checkout.py"
-  ],
-  "profile_api": [
-    "apis/profile.py"
-  ],
-  "login_journey": [
-    "frontend/login.jsx"
-  ],
-  "checkout_journey": [
-    "frontend/checkout.jsx"
-  ],
-  "profile_journey": [
-    "frontend/profile.jsx"
-  ]
+    "terraform/customer_database.tf": "customer_database",
+    "terraform/redis.tf": "redis_cache",
+
+    "services/login/app.py": "login_service",
+    "services/payment/app.py": "payment_service",
+    "services/profile/app.py": "profile_service",
+
+    "apis/login.py": "login_api",
+    "apis/checkout.py": "checkout_api",
+    "apis/profile.py": "profile_api",
+
+    "frontend/login.jsx": "login_journey",
+    "frontend/checkout.jsx": "checkout_journey",
+    "frontend/profile.jsx": "profile_journey"
 }

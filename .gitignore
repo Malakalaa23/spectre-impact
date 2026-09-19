@@ -1,6 +1,7 @@
-.env
-venv/
 __pycache__/
+.pytest_cache/
 *.pyc
-history.db
-*.log
+.venv/
+.env
+.spectre/
+*.egg-info/

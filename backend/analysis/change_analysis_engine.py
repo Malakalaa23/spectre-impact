@@ -190,11 +190,12 @@ class ChangeAnalysisEngine:
         return result
 
 
-def analyze_impact(changed_files: list[str]) -> dict:
-    """Integration contract for the webhook backend.
 
-    Returns a compact, JSON-ready result without requiring a GitHub event or
-    either teammate's module.
+def analyze_impact(changed_files: list[str]) -> dict:
+    """Run the deterministic analysis engine for a list of changed files.
+
+    This is the stable integration contract used by the CLI, API, and dashboard.
+    It returns only JSON-serializable values.
     """
     data_dir = Path(__file__).resolve().parents[1] / "data"
     engine = ChangeAnalysisEngine(
@@ -207,15 +208,26 @@ def analyze_impact(changed_files: list[str]) -> dict:
     pull_request = PullRequestEvent(
         action="opened", repository_name="unknown", pr_number=0, title="",
         body="", author="", head_branch="", base_branch="", created_at="",
-        updated_at="", html_url="", changed_files=changed_files,
+        updated_at="", html_url="", changed_files=list(changed_files),
     )
     result = engine.analyze_change(pull_request)
     affected_nodes = sorted({node for path in result.evidence for node in path})
     return {
+        "changed_files": result.changed_files,
         "changed_resource": result.changed_resources[0] if result.changed_resources else "unknown",
         "changed_resources": result.changed_resources,
-        "affected_services": affected_nodes,
+        "affected_nodes": affected_nodes,
+        "affected_services": result.affected_services,
+        "affected_databases": result.affected_databases,
+        "affected_apis": result.affected_apis,
+        "affected_frontends": result.affected_frontends,
+        "affected_customer_journeys": result.affected_customer_journeys,
+        "affected_business_capabilities": result.affected_business_capabilities,
         "business_impact": result.business_impact,
+        "severity": result.severity.value,
+        "confidence": result.confidence,
+        "deployment_strategy": result.deployment_strategy.value,
+        "rollback_required": result.rollback_required,
         "unknown_resources": result.unknown_resources,
         "evidence": result.evidence,
     }
