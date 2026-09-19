@@ -192,7 +192,14 @@ except ImportError as e:
 # -------------------------------------------------------------------
 # Live Demo Ticket Stream
 # -------------------------------------------------------------------
+# _LIVE_FEED:      rolling buffer of the most recent events (max 50).
+# _LIVE_FEED_TOTAL: monotonic lifetime counter; never decreases.
+#                   Used by /api/live-feed as the "total" field so
+#                   consumers can detect that the feed is still growing
+#                   even after the rolling buffer is full.
+# -------------------------------------------------------------------
 _LIVE_FEED: deque = deque(maxlen=50)
+_live_feed_total_events: int = 0
 
 _LIVE_FEED_SAMPLES = [
     ("terraform/customer_database.tf", "PR"),
@@ -208,6 +215,8 @@ _live_feed_counter = 0
 
 
 def _push_live_event(message: str, kind: str = "info", meta: dict | None = None) -> None:
+    global _live_feed_total_events
+    _live_feed_total_events += 1
     _LIVE_FEED.appendleft({
         "timestamp": datetime.now(timezone.utc).isoformat(),
         "message": message,
@@ -341,11 +350,23 @@ def health_memory():
 # -------------------------------------------------------------------
 @app.get("/api/live-feed")
 def live_feed(limit: int = 20) -> dict[str, Any]:
+    """
+    Return recent live-feed events.
+
+    Fields:
+        count:       number of events in THIS response (<= limit)
+        total:       lifetime count of events since server start
+                     (monotonically increasing; never resets)
+        buffer_size: number of events currently in the rolling buffer
+                     (capped at 50)
+        events:      the most recent events, newest first
+    """
     limit = max(1, min(limit, 50))
     events = list(_LIVE_FEED)[:limit]
     return {
         "count": len(events),
-        "total": len(_LIVE_FEED),
+        "total": _live_feed_total_events,
+        "buffer_size": len(_LIVE_FEED),
         "events": events,
     }
 
