@@ -5,6 +5,7 @@ Endpoints:
     GET  /ping                    — health check.
     GET  /health/memory           — memory backend status.
     GET  /api/live-feed           — recent auto-fired demo events.
+    GET  /api/landing/presets     — bilingual landing page content.
     POST /webhook                 — GitHub webhook receiver (PR + push).
     GET  /api/analyses            — list recent analyses.
     GET  /api/analyses/{pr}       — full analysis for a PR.
@@ -57,7 +58,7 @@ def log(msg: str) -> None:
 
 
 # -------------------------------------------------------------------
-# FastAPI app — must be defined BEFORE any @app decorator is used
+# FastAPI app
 # -------------------------------------------------------------------
 app = FastAPI(title="Spectre Impact")
 GITHUB_TOKEN = os.getenv("GITHUB_TOKEN")
@@ -80,7 +81,7 @@ from github_client import (
     fetch_commit_diff,
 )
 
-# BFS engine — the single source of truth
+# BFS engine
 try:
     from backend.analysis.change_analysis_engine import analyze_impact
     log("analyze_impact imported")
@@ -98,7 +99,7 @@ except ImportError as e:
         }
 
 
-# AI agent (Groq-based insights + code review)
+# AI agent
 try:
     from ai_agent_groq import (
         generate_insights,
@@ -148,7 +149,7 @@ except ImportError as e:
     def get_cache_key_for_diff(diff): return hashlib.md5(diff.encode()).hexdigest()
 
 
-# Lya chat agent — memory, agent, safety (all optional)
+# Lya chat agent
 try:
     from chat.agent import chat as lya_chat
     from chat.memory import (
@@ -178,7 +179,7 @@ except ImportError:
     def sanitize_output(text): return text
 
 
-# Text-to-speech (Edge TTS based)
+# TTS
 try:
     from ai.tts import synthesize_async as tts_synthesize
     log("TTS module imported")
@@ -190,13 +191,95 @@ except ImportError as e:
 
 
 # -------------------------------------------------------------------
-# Live Demo Ticket Stream
+# Landing page presets (bilingual)
 # -------------------------------------------------------------------
-# _LIVE_FEED:      rolling buffer of the most recent events (max 50).
-# _LIVE_FEED_TOTAL: monotonic lifetime counter; never decreases.
-#                   Used by /api/live-feed as the "total" field so
-#                   consumers can detect that the feed is still growing
-#                   even after the rolling buffer is full.
+LANDING_PRESETS: dict[str, dict[str, Any]] = {
+    "en": {
+        "language": "en",
+        "flag": "GB",
+        "button_label": "English",
+        "headline": "Spectre Impact",
+        "subheadline": "Know what breaks before you deploy.",
+        "tagline": "AI-powered GitHub change intelligence for DevOps teams",
+        "welcome_message": (
+            "Hi, I am Lya. I help you understand what a code change will break, "
+            "who it affects, and how to roll it back. Ask me anything about your repo."
+        ),
+        "example_prompts": [
+            "What services are affected by customer_database.tf?",
+            "Show me past incidents affecting payment_service",
+            "Who owns the checkout API?",
+            "Would changing services/payment/app.py break production?",
+            "What happened in PR #5?",
+        ],
+        "quick_actions": [
+            {"label": "Analyze a file", "action": "analyze_file"},
+            {"label": "Show incidents", "action": "show_incidents"},
+            {"label": "List services", "action": "list_services"},
+        ],
+        "tts_default_voice": "en-us-female",
+        "tts_language": "en",
+    },
+    "ar": {
+        "language": "ar",
+        "flag": "EG",
+        "button_label": "مصري",
+        "headline": "سبكتر إمباكت",
+        "subheadline": "اعرف إيه اللي هيكسر قبل ما تعمل deploy.",
+        "tagline": "منصة ذكاء اصطناعي لفهم تأثير تغييرات GitHub على فريق الـ DevOps",
+        "welcome_message": (
+            "أهلاً يا باشا، أنا ليا. هساعدك تعرف أي تغيير في الكود هيكسر إيه، "
+            "وهيأثر على مين، وإزاي تعمل rollback بأمان. اسألني أي حاجة عن الريبو بتاعك."
+        ),
+        "example_prompts": [
+            "إيه الخدمات اللي هتتأثر لو غيرت customer_database.tf؟",
+            "وريني الحوادث اللي حصلت في payment_service",
+            "مين صاحب الـ checkout API؟",
+            "لو غيرت services/payment/app.py ممكن يحصل مشكلة؟",
+            "إيه اللي حصل في PR #5؟",
+        ],
+        "quick_actions": [
+            {"label": "حلّل ملف", "action": "analyze_file"},
+            {"label": "وريني الحوادث", "action": "show_incidents"},
+            {"label": "اعرض الخدمات", "action": "list_services"},
+        ],
+        "tts_default_voice": "ar-eg-female",
+        "tts_language": "ar",
+    },
+}
+
+
+# -------------------------------------------------------------------
+# Blast radius
+# -------------------------------------------------------------------
+def calculate_blast_radius(changed_files: list[str]) -> dict[str, Any]:
+    if not changed_files:
+        return {
+            "changed_resource": "unknown",
+            "affected_services": ["unknown_service"],
+            "business_impact": 0,
+        }
+
+    try:
+        result = analyze_impact(changed_files)
+    except Exception as exc:
+        log(f"analyze_impact failed: {exc}\n{traceback.format_exc()}")
+        return {
+            "changed_resource": "unknown",
+            "affected_services": ["unknown_service"],
+            "business_impact": 0,
+        }
+
+    affected = result.get("affected_services") or ["unknown_service"]
+    return {
+        "changed_resource": result.get("changed_resource", "unknown"),
+        "affected_services": affected,
+        "business_impact": result.get("business_impact", 0),
+    }
+
+
+# -------------------------------------------------------------------
+# Live Demo Ticket Stream
 # -------------------------------------------------------------------
 _LIVE_FEED: deque = deque(maxlen=50)
 _live_feed_total_events: int = 0
@@ -284,35 +367,6 @@ async def _stop_live_demo_stream() -> None:
 
 
 # -------------------------------------------------------------------
-# Blast radius
-# -------------------------------------------------------------------
-def calculate_blast_radius(changed_files: list[str]) -> dict[str, Any]:
-    if not changed_files:
-        return {
-            "changed_resource": "unknown",
-            "affected_services": ["unknown_service"],
-            "business_impact": 0,
-        }
-
-    try:
-        result = analyze_impact(changed_files)
-    except Exception as exc:
-        log(f"analyze_impact failed: {exc}\n{traceback.format_exc()}")
-        return {
-            "changed_resource": "unknown",
-            "affected_services": ["unknown_service"],
-            "business_impact": 0,
-        }
-
-    affected = result.get("affected_services") or ["unknown_service"]
-    return {
-        "changed_resource": result.get("changed_resource", "unknown"),
-        "affected_services": affected,
-        "business_impact": result.get("business_impact", 0),
-    }
-
-
-# -------------------------------------------------------------------
 # Pydantic models
 # -------------------------------------------------------------------
 class ChatRequest(BaseModel):
@@ -346,21 +400,34 @@ def health_memory():
 
 
 # -------------------------------------------------------------------
+# Landing page presets
+# -------------------------------------------------------------------
+@app.get("/api/landing/presets")
+def landing_presets() -> dict[str, Any]:
+    """
+    Return bilingual landing page content for the frontend.
+
+    Frontend usage:
+        presets = requests.get(f"{BASE}/api/landing/presets").json()
+        chosen = presets[user_language]  # "en" or "ar"
+        # Render chosen["headline"], chosen["example_prompts"], etc.
+
+    The frontend should display two buttons:
+        [🇬🇧 English]   [🇪🇬 مصري]
+    Each maps to a key ("en" or "ar") in this response.
+    """
+    return {
+        "available_languages": list(LANDING_PRESETS.keys()),
+        "default": "en",
+        "presets": LANDING_PRESETS,
+    }
+
+
+# -------------------------------------------------------------------
 # Live feed
 # -------------------------------------------------------------------
 @app.get("/api/live-feed")
 def live_feed(limit: int = 20) -> dict[str, Any]:
-    """
-    Return recent live-feed events.
-
-    Fields:
-        count:       number of events in THIS response (<= limit)
-        total:       lifetime count of events since server start
-                     (monotonically increasing; never resets)
-        buffer_size: number of events currently in the rolling buffer
-                     (capped at 50)
-        events:      the most recent events, newest first
-    """
     limit = max(1, min(limit, 50))
     events = list(_LIVE_FEED)[:limit]
     return {

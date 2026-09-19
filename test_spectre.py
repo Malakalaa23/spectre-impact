@@ -6,6 +6,7 @@ Runs every local test in sequence and prints a summary.
 Usage:
     python test_spectre.py            # run all
     python test_spectre.py live       # only live feed tests
+    python test_spectre.py landing    # only landing preset tests
     python test_spectre.py rag        # only RAG tests
     python test_spectre.py chat       # only chat tests
     python test_spectre.py tts        # only TTS tests
@@ -116,6 +117,39 @@ def test_live_feed_grows() -> None:
         record(group, "feed grows over time", c2 > c1, f"{c1} -> {c2}")
     except Exception as exc:
         record(group, "feed grows over time", False, str(exc))
+
+
+# ===========================================================================
+# GROUP: landing — Bilingual landing presets
+# ===========================================================================
+def test_landing_presets() -> None:
+    group = "landing"
+    try:
+        import requests
+        r = requests.get(f"{SERVER_URL}/api/landing/presets", timeout=10)
+        if r.status_code != 200:
+            record(group, "landing presets reachable", False, f"status {r.status_code}")
+            return
+        data = r.json()
+        record(group, "landing presets reachable", True)
+        record(group, "has available_languages", "available_languages" in data)
+        langs = data.get("available_languages", [])
+        record(group, "en and ar both present", "en" in langs and "ar" in langs, f"langs={langs}")
+        presets = data.get("presets", {})
+        for lang in ("en", "ar"):
+            preset = presets.get(lang, {})
+            has_all = all(
+                k in preset
+                for k in ("headline", "subheadline", "welcome_message", "example_prompts", "tts_default_voice")
+            )
+            record(group, f"{lang} preset complete", has_all)
+        # Verify Arabic preset uses Egyptian dialect markers
+        ar = presets.get("ar", {})
+        welcome = ar.get("welcome_message", "")
+        has_arabic = any("\u0600" <= c <= "\u06ff" for c in welcome)
+        record(group, "ar preset contains Arabic characters", has_arabic)
+    except Exception as exc:
+        record(group, "landing presets reachable", False, str(exc))
 
 
 # ===========================================================================
@@ -376,6 +410,9 @@ TESTS: dict[str, list[Callable]] = {
     "live": [
         server_required("live", test_live_feed_endpoint),
         server_required("live", test_live_feed_grows),
+    ],
+    "landing": [
+        server_required("landing", test_landing_presets),
     ],
     "rag": [
         test_rag_collection_stats,
