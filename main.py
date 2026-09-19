@@ -4,6 +4,7 @@ main.py — Spectre Impact FastAPI backend.
 Endpoints:
     GET  /ping                    — health check.
     GET  /health/memory           — memory backend status.
+    GET  /api/live-feed           — recent auto-fired demo events.
     POST /webhook                 — GitHub webhook receiver (PR + push).
     GET  /api/analyses            — list recent analyses.
     GET  /api/analyses/{pr}       — full analysis for a PR.
@@ -11,13 +12,6 @@ Endpoints:
     POST /api/chat                — Lya chat endpoint.
     POST /api/chat/clear          — clear a session's history.
     POST /api/tts                 — text-to-speech (MP3 output).
-
-Design notes:
-    - The BFS logic delegates to backend.analysis.change_analysis_engine
-      .analyze_impact(), the single source of truth for the analysis engine.
-    - The chat endpoints use chat.agent + chat.memory.
-    - The TTS endpoint uses ai.tts (Edge TTS, English + Egyptian Arabic).
-    - Every optional module degrades gracefully if unavailable.
 """
 
 import sys
@@ -25,9 +19,11 @@ import os
 import json
 import yaml
 import hashlib
+import asyncio
 import traceback
 from datetime import datetime, timezone
 from typing import Any
+from collections import deque
 
 from fastapi import BackgroundTasks, FastAPI, Request, HTTPException
 from fastapi.responses import Response
@@ -61,6 +57,13 @@ def log(msg: str) -> None:
 
 
 # -------------------------------------------------------------------
+# FastAPI app — must be defined BEFORE any @app decorator is used
+# -------------------------------------------------------------------
+app = FastAPI(title="Spectre Impact")
+GITHUB_TOKEN = os.getenv("GITHUB_TOKEN")
+
+
+# -------------------------------------------------------------------
 # Spectre Impact internal imports
 # -------------------------------------------------------------------
 from database import (
@@ -80,9 +83,9 @@ from github_client import (
 # BFS engine — the single source of truth
 try:
     from backend.analysis.change_analysis_engine import analyze_impact
-    log("✅ analyze_impact imported")
+    log("analyze_impact imported")
 except ImportError as e:
-    log(f"⚠️ analyze_impact import failed: {e}")
+    log(f"analyze_impact import failed: {e}")
 
     def analyze_impact(changed_files):
         return {
@@ -102,13 +105,13 @@ try:
         generate_inline_suggestions,
         generate_code_review,
     )
-    log("✅ AI agent imported")
+    log("AI agent imported")
 except ImportError as e:
-    log(f"⚠️ AI agent import failed: {e}")
+    log(f"AI agent import failed: {e}")
 
     def generate_insights(services, impact):
         return {
-            "simulation": "AI unavailable – using fallback.",
+            "simulation": "AI unavailable - using fallback.",
             "severity": "Medium",
             "rollback": ["Revert changes", "Restart services"],
             "validation": ["Check health endpoints"],
@@ -136,9 +139,9 @@ try:
         cache_diff_suggestions,
         get_cache_key_for_diff,
     )
-    log("✅ Cache imported")
+    log("Cache imported")
 except ImportError as e:
-    log(f"⚠️ Cache import failed: {e}")
+    log(f"Cache import failed: {e}")
 
     def get_cached_diff_suggestions(key): return None
     def cache_diff_suggestions(key, suggestions): pass
@@ -154,9 +157,9 @@ try:
         clear_session,
         health as memory_health,
     )
-    log("✅ Lya chat agent imported")
+    log("Lya chat agent imported")
 except ImportError as e:
-    log(f"⚠️ Lya chat import failed: {e}")
+    log(f"Lya chat import failed: {e}")
 
     async def lya_chat(message, history=None, tools=None):
         return {"response": "Chat agent unavailable.", "tool_calls": []}
@@ -169,9 +172,8 @@ except ImportError as e:
 
 try:
     from chat.safety import sanitize_input, sanitize_output
-    log("✅ Safety module imported")
+    log("Safety module imported")
 except ImportError:
-    # Safety module not yet built — safe no-op fallbacks.
     def sanitize_input(text): return text
     def sanitize_output(text): return text
 
@@ -179,25 +181,103 @@ except ImportError:
 # Text-to-speech (Edge TTS based)
 try:
     from ai.tts import synthesize_async as tts_synthesize
-    log("✅ TTS module imported")
+    log("TTS module imported")
 except ImportError as e:
-    log(f"⚠️ TTS module import failed: {e}")
+    log(f"TTS module import failed: {e}")
 
     async def tts_synthesize(text, language="auto", voice=None):
         raise RuntimeError("TTS module not available")
 
 
 # -------------------------------------------------------------------
-# Blast radius — delegates to the real engine
+# Live Demo Ticket Stream
+# -------------------------------------------------------------------
+_LIVE_FEED: deque = deque(maxlen=50)
+
+_LIVE_FEED_SAMPLES = [
+    ("terraform/customer_database.tf", "PR"),
+    ("services/payment/app.py", "PR"),
+    ("services/login/app.py", "PR"),
+    ("apis/checkout.py", "Commit"),
+    ("frontend/checkout.jsx", "PR"),
+    ("terraform/redis.tf", "Commit"),
+]
+
+_live_feed_task: asyncio.Task | None = None
+_live_feed_counter = 0
+
+
+def _push_live_event(message: str, kind: str = "info", meta: dict | None = None) -> None:
+    _LIVE_FEED.appendleft({
+        "timestamp": datetime.now(timezone.utc).isoformat(),
+        "message": message,
+        "kind": kind,
+        "meta": meta or {},
+    })
+
+
+async def _run_live_demo_stream(interval_seconds: int = 30) -> None:
+    global _live_feed_counter
+
+    _push_live_event("Live demo stream started", kind="system")
+    log("Live demo ticket stream started")
+
+    while True:
+        try:
+            await asyncio.sleep(interval_seconds)
+        except asyncio.CancelledError:
+            log("Live demo ticket stream cancelled")
+            return
+
+        try:
+            _live_feed_counter += 1
+            file_path, kind = _LIVE_FEED_SAMPLES[_live_feed_counter % len(_LIVE_FEED_SAMPLES)]
+
+            result = analyze_impact([file_path])
+            affected = result.get("affected_services") or []
+            impact = result.get("business_impact", 0)
+
+            if kind == "PR":
+                msg = (
+                    f"PR #{100 + _live_feed_counter} analyzed - "
+                    f"{file_path} -> {len(affected)} services, {impact}% impact"
+                )
+            else:
+                msg = (
+                    f"Commit {hashlib.md5(file_path.encode()).hexdigest()[:7]} analyzed - "
+                    f"{file_path} -> {len(affected)} services affected"
+                )
+
+            _push_live_event(
+                msg,
+                kind="pr" if kind == "PR" else "commit",
+                meta={"file": file_path, "affected": affected[:5], "impact": impact},
+            )
+            log(f"Live event: {msg}")
+
+        except Exception as exc:
+            log(f"Live feed task error: {exc}")
+            _push_live_event(f"Analysis error: {str(exc)[:100]}", kind="error")
+
+
+@app.on_event("startup")
+async def _start_live_demo_stream() -> None:
+    global _live_feed_task
+    if _live_feed_task is None or _live_feed_task.done():
+        _live_feed_task = asyncio.create_task(_run_live_demo_stream(interval_seconds=30))
+
+
+@app.on_event("shutdown")
+async def _stop_live_demo_stream() -> None:
+    global _live_feed_task
+    if _live_feed_task is not None and not _live_feed_task.done():
+        _live_feed_task.cancel()
+
+
+# -------------------------------------------------------------------
+# Blast radius
 # -------------------------------------------------------------------
 def calculate_blast_radius(changed_files: list[str]) -> dict[str, Any]:
-    """
-    Compute the blast radius of a set of changed files.
-
-    Delegates to backend.analysis.change_analysis_engine.analyze_impact —
-    the single source of truth used by the chat tools and the code review
-    pipeline.
-    """
     if not changed_files:
         return {
             "changed_resource": "unknown",
@@ -208,7 +288,7 @@ def calculate_blast_radius(changed_files: list[str]) -> dict[str, Any]:
     try:
         result = analyze_impact(changed_files)
     except Exception as exc:
-        log(f"❌ analyze_impact failed: {exc}\n{traceback.format_exc()}")
+        log(f"analyze_impact failed: {exc}\n{traceback.format_exc()}")
         return {
             "changed_resource": "unknown",
             "affected_services": ["unknown_service"],
@@ -221,13 +301,6 @@ def calculate_blast_radius(changed_files: list[str]) -> dict[str, Any]:
         "affected_services": affected,
         "business_impact": result.get("business_impact", 0),
     }
-
-
-# -------------------------------------------------------------------
-# FastAPI app
-# -------------------------------------------------------------------
-app = FastAPI(title="Spectre Impact")
-GITHUB_TOKEN = os.getenv("GITHUB_TOKEN")
 
 
 # -------------------------------------------------------------------
@@ -264,27 +337,30 @@ def health_memory():
 
 
 # -------------------------------------------------------------------
+# Live feed
+# -------------------------------------------------------------------
+@app.get("/api/live-feed")
+def live_feed(limit: int = 20) -> dict[str, Any]:
+    limit = max(1, min(limit, 50))
+    events = list(_LIVE_FEED)[:limit]
+    return {
+        "count": len(events),
+        "total": len(_LIVE_FEED),
+        "events": events,
+    }
+
+
+# -------------------------------------------------------------------
 # Lya chat
 # -------------------------------------------------------------------
 @app.post("/api/chat", response_model=ChatResponse)
 async def chat_endpoint(req: ChatRequest) -> ChatResponse:
-    """
-    Send a message to Lya and get a response.
-
-    Flow:
-        1. Sanitize input (blocks prompt injection).
-        2. Load session history.
-        3. Call the agent.
-        4. Save user message + assistant reply.
-        5. Sanitize output (strips secrets).
-        6. Return the reply.
-    """
-    log(f"💬 /api/chat session={req.session_id} len={len(req.message)}")
+    log(f"/api/chat session={req.session_id} len={len(req.message)}")
 
     try:
         clean_message = sanitize_input(req.message)
     except ValueError as exc:
-        log(f"🚫 Blocked input in {req.session_id}: {exc}")
+        log(f"Blocked input in {req.session_id}: {exc}")
         raise HTTPException(status_code=400, detail="Invalid input.") from exc
 
     history = get_history(req.session_id)
@@ -292,7 +368,7 @@ async def chat_endpoint(req: ChatRequest) -> ChatResponse:
     try:
         result = await lya_chat(clean_message, history=history)
     except Exception as exc:
-        log(f"❌ Chat failed: {exc}\n{traceback.format_exc()}")
+        log(f"Chat failed: {exc}\n{traceback.format_exc()}")
         raise HTTPException(status_code=500, detail="Chat failed.") from exc
 
     save_message(req.session_id, "user", clean_message)
@@ -309,31 +385,17 @@ async def chat_endpoint(req: ChatRequest) -> ChatResponse:
 
 @app.post("/api/chat/clear")
 async def chat_clear(session_id: str) -> dict[str, Any]:
-    """Clear a session's conversation history."""
     clear_session(session_id)
-    log(f"🧹 Cleared session {session_id}")
+    log(f"Cleared session {session_id}")
     return {"status": "cleared", "session_id": session_id}
 
 
 # -------------------------------------------------------------------
-# Text-to-speech endpoint
+# Text-to-speech
 # -------------------------------------------------------------------
 @app.post("/api/tts")
 async def tts_endpoint(req: TTSRequest):
-    """
-    Convert text to speech and return MP3 audio bytes.
-
-    Content-Type: audio/mpeg
-    Body: raw MP3 bytes.
-
-    Frontend usage:
-        response = requests.post(
-            "http://localhost:8000/api/tts",
-            json={"text": "...", "language": "auto"},
-        )
-        st.audio(response.content, format="audio/mp3")
-    """
-    log(f"🔊 /api/tts lang={req.language} chars={len(req.text)}")
+    log(f"/api/tts lang={req.language} chars={len(req.text)}")
 
     try:
         audio_bytes = await tts_synthesize(
@@ -342,7 +404,7 @@ async def tts_endpoint(req: TTSRequest):
             voice=req.voice,
         )
     except Exception as exc:
-        log(f"❌ TTS failed: {exc}\n{traceback.format_exc()}")
+        log(f"TTS failed: {exc}\n{traceback.format_exc()}")
         raise HTTPException(status_code=500, detail=f"TTS failed: {exc}") from exc
 
     if not audio_bytes:
@@ -370,7 +432,7 @@ def parse_payload(payload: dict):
 
 def fetch_changed_files(repo_full_name: str, pr_number: int) -> list:
     if not GITHUB_TOKEN:
-        log("⚠️ GITHUB_TOKEN missing – cannot fetch files.")
+        log("GITHUB_TOKEN missing - cannot fetch files.")
         return []
     try:
         auth = Auth.Token(GITHUB_TOKEN)
@@ -379,16 +441,16 @@ def fetch_changed_files(repo_full_name: str, pr_number: int) -> list:
         pr = repo.get_pull(pr_number)
         return [f.filename for f in pr.get_files()]
     except GithubException as e:
-        log(f"❌ GitHub API error: {e}")
+        log(f"GitHub API error: {e}")
         return []
     except Exception as e:
-        log(f"❌ Unexpected error fetching files: {e}")
+        log(f"Unexpected error fetching files: {e}")
         return []
 
 
 def get_commit_sha_from_pr(repo_name: str, pr_number: int) -> str | None:
     if not GITHUB_TOKEN:
-        log("⚠️ GITHUB_TOKEN not set – cannot get commit SHA.")
+        log("GITHUB_TOKEN not set - cannot get commit SHA.")
         return None
     try:
         auth = Auth.Token(GITHUB_TOKEN)
@@ -397,13 +459,13 @@ def get_commit_sha_from_pr(repo_name: str, pr_number: int) -> str | None:
         pr = repo.get_pull(pr_number)
         for commit in pr.get_commits():
             return commit.sha
-        log(f"⚠️ No commits found in PR #{pr_number}")
+        log(f"No commits found in PR #{pr_number}")
         return None
     except GithubException as e:
-        log(f"❌ GitHub API error getting commit SHA: {e}")
+        log(f"GitHub API error getting commit SHA: {e}")
         return None
     except Exception as e:
-        log(f"❌ Unexpected error getting commit SHA: {e}")
+        log(f"Unexpected error getting commit SHA: {e}")
         return None
 
 
@@ -411,30 +473,34 @@ def get_commit_sha_from_pr(repo_name: str, pr_number: int) -> str | None:
 # PR analysis pipeline
 # -------------------------------------------------------------------
 def run_analysis_pipeline(pr_number: int, repo_name: str, action: str) -> None:
-    log(f"🚀 Pipeline started for PR #{pr_number} in {repo_name}")
+    log(f"Pipeline started for PR #{pr_number} in {repo_name}")
     changed_files = fetch_changed_files(repo_name, pr_number)
-    log(f"📄 Changed files: {changed_files}")
+    log(f"Changed files: {changed_files}")
 
     try:
         blast = calculate_blast_radius(changed_files)
-        log(f"💥 Blast radius: {blast}")
+        log(f"Blast radius: {blast}")
+        _push_live_event(
+            f"Real PR #{pr_number} analyzed - {len(blast.get('affected_services', []))} services affected",
+            kind="pr",
+        )
     except Exception as e:
-        log(f"❌ BFS failed: {e}\n{traceback.format_exc()}")
+        log(f"BFS failed: {e}\n{traceback.format_exc()}")
         return
 
     commit_sha = get_commit_sha_from_pr(repo_name, pr_number)
-    log(f"📝 Commit SHA: {commit_sha}")
+    log(f"Commit SHA: {commit_sha}")
 
     diff = ""
     if commit_sha:
         diff = fetch_commit_diff(repo_name, commit_sha)
-    log(f"📝 Diff fetched: {len(diff)} characters")
+    log(f"Diff fetched: {len(diff)} characters")
 
     try:
         code_review = generate_code_review(diff, changed_files, blast.get("affected_services", []))
-        log(f"🔍 Code review verdict: {code_review.get('overall_verdict', 'Unknown')}")
+        log(f"Code review verdict: {code_review.get('overall_verdict', 'Unknown')}")
     except Exception as e:
-        log(f"❌ Code review failed: {e}\n{traceback.format_exc()}")
+        log(f"Code review failed: {e}\n{traceback.format_exc()}")
         code_review = {
             "code_quality": "Unable to Analyze",
             "bugs_found": [],
@@ -446,11 +512,11 @@ def run_analysis_pipeline(pr_number: int, repo_name: str, action: str) -> None:
 
     try:
         insights = generate_insights(blast["affected_services"], blast["business_impact"])
-        log(f"🤖 Insights generated: {insights.get('severity', 'Unknown')}")
+        log(f"Insights generated: {insights.get('severity', 'Unknown')}")
     except Exception as e:
-        log(f"❌ AI agent failed: {e}\n{traceback.format_exc()}")
+        log(f"AI agent failed: {e}\n{traceback.format_exc()}")
         insights = {
-            "simulation": "AI unavailable – using fallback.",
+            "simulation": "AI unavailable - using fallback.",
             "severity": "Medium",
             "rollback": ["Revert changes", "Restart services"],
             "validation": ["Check health endpoints"],
@@ -459,40 +525,44 @@ def run_analysis_pipeline(pr_number: int, repo_name: str, action: str) -> None:
 
     try:
         save_analysis(pr_number, repo_name, blast, insights)
-        log(f"💾 Saved analysis for PR #{pr_number}")
+        log(f"Saved analysis for PR #{pr_number}")
     except Exception as e:
-        log(f"❌ Database save failed: {e}\n{traceback.format_exc()}")
+        log(f"Database save failed: {e}\n{traceback.format_exc()}")
 
     try:
         post_github_comment(pr_number, repo_name, blast, insights, code_review)
-        log(f"📝 Comment posted to PR #{pr_number}")
+        log(f"Comment posted to PR #{pr_number}")
     except Exception as e:
-        log(f"❌ GitHub comment failed: {e}\n{traceback.format_exc()}")
+        log(f"GitHub comment failed: {e}\n{traceback.format_exc()}")
 
 
 # -------------------------------------------------------------------
 # Commit analysis pipeline
 # -------------------------------------------------------------------
 def run_commit_analysis(repo_name: str, commit_sha: str, branch: str, changed_files: list) -> None:
-    log(f"🚀 Auto-analyzing commit {commit_sha[:7]} on {branch}")
+    log(f"Auto-analyzing commit {commit_sha[:7]} on {branch}")
 
     try:
         blast = calculate_blast_radius(changed_files)
-        log(f"💥 Blast radius: {blast}")
+        log(f"Blast radius: {blast}")
+        _push_live_event(
+            f"Real commit {commit_sha[:7]} analyzed - {len(blast.get('affected_services', []))} services affected",
+            kind="commit",
+        )
     except Exception as e:
-        log(f"❌ BFS failed: {e}\n{traceback.format_exc()}")
+        log(f"BFS failed: {e}\n{traceback.format_exc()}")
         return
 
     diff = fetch_commit_diff(repo_name, commit_sha)
     if not diff:
-        log("⚠️ No diff available – skipping inline analysis")
+        log("No diff available - skipping inline analysis")
         return
 
     try:
         code_review = generate_code_review(diff, changed_files, blast.get("affected_services", []))
-        log(f"🔍 Code review: {code_review.get('overall_verdict', 'Unknown')}")
+        log(f"Code review: {code_review.get('overall_verdict', 'Unknown')}")
     except Exception as e:
-        log(f"❌ Code review failed: {e}\n{traceback.format_exc()}")
+        log(f"Code review failed: {e}\n{traceback.format_exc()}")
         code_review = {
             "code_quality": "Unable to Analyze",
             "bugs_found": [],
@@ -506,62 +576,54 @@ def run_commit_analysis(repo_name: str, commit_sha: str, branch: str, changed_fi
     cached_suggestions = get_cached_diff_suggestions(diff_key)
 
     if cached_suggestions is not None:
-        log(f"📦 Using cached suggestions ({len(cached_suggestions)} items)")
+        log(f"Using cached suggestions ({len(cached_suggestions)} items)")
         suggestions = cached_suggestions
     else:
         try:
             suggestions = generate_inline_suggestions(diff, changed_files, blast["affected_services"])
-            log(f"💡 Generated {len(suggestions)} inline suggestions")
+            log(f"Generated {len(suggestions)} inline suggestions")
             if suggestions:
                 cache_diff_suggestions(diff_key, suggestions)
         except Exception as e:
-            log(f"❌ AI generation failed: {e}\n{traceback.format_exc()}")
+            log(f"AI generation failed: {e}\n{traceback.format_exc()}")
             suggestions = []
 
     if suggestions:
         for s in suggestions:
             try:
                 post_inline_comment(
-                    repo_name,
-                    commit_sha,
-                    s.get("file"),
-                    s.get("line"),
-                    s.get("suggestion"),
-                    s.get("severity", "High"),
+                    repo_name, commit_sha,
+                    s.get("file"), s.get("line"),
+                    s.get("suggestion"), s.get("severity", "High"),
                 )
-                log(f"📝 Posted inline comment on {s.get('file')}:{s.get('line')}")
+                log(f"Posted inline comment on {s.get('file')}:{s.get('line')}")
             except Exception as e:
-                log(f"❌ Failed to post inline comment: {e}")
+                log(f"Failed to post inline comment: {e}")
     else:
-        log("💡 No inline suggestions generated")
+        log("No inline suggestions generated")
 
     try:
         pr_number = get_pr_for_branch(repo_name, branch)
         if pr_number:
-            log(f"🔍 Found PR #{pr_number} for this branch")
+            log(f"Found PR #{pr_number} for this branch")
             insights = generate_insights(blast["affected_services"], blast["business_impact"])
             post_github_comment(pr_number, repo_name, blast, insights, code_review)
-            log(f"📝 Posted PR comment on #{pr_number}")
+            log(f"Posted PR comment on #{pr_number}")
         else:
-            log("ℹ️ No open PR found for this branch")
+            log("No open PR found for this branch")
     except Exception as e:
-        log(f"⚠️ PR comment failed: {e}")
+        log(f"PR comment failed: {e}")
 
     try:
         save_commit_analysis(
-            commit_sha,
-            repo_name,
-            branch,
-            changed_files,
-            blast["affected_services"],
-            blast["business_impact"],
-            suggestions,
+            commit_sha, repo_name, branch, changed_files,
+            blast["affected_services"], blast["business_impact"], suggestions,
         )
-        log(f"💾 Saved analysis for commit {commit_sha[:7]}")
+        log(f"Saved analysis for commit {commit_sha[:7]}")
     except Exception as e:
-        log(f"❌ Database save failed: {e}\n{traceback.format_exc()}")
+        log(f"Database save failed: {e}\n{traceback.format_exc()}")
 
-    log(f"✅ Commit analysis complete for {commit_sha[:7]}")
+    log(f"Commit analysis complete for {commit_sha[:7]}")
 
 
 # -------------------------------------------------------------------
@@ -612,7 +674,7 @@ async def webhook(request: Request, background_tasks: BackgroundTasks):
     if action not in ["opened", "reopened"]:
         return {"status": "ignored"}
 
-    log(f"🔥 Webhook received: PR #{pr_number}, {repo_name}, action={action}")
+    log(f"Webhook received: PR #{pr_number}, {repo_name}, action={action}")
     background_tasks.add_task(run_analysis_pipeline, pr_number, repo_name, action)
     return {"received": True}
 
@@ -643,5 +705,5 @@ def metrics():
 # -------------------------------------------------------------------
 if __name__ == "__main__":
     import uvicorn
-    log("🚀 Starting Spectre Impact server on http://0.0.0.0:8000")
+    log("Starting Spectre Impact server on http://0.0.0.0:8000")
     uvicorn.run(app, host="0.0.0.0", port=8000, reload=False)
