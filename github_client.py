@@ -14,16 +14,21 @@ Design notes:
   - Emoji used as status markers, never decoration. Every emoji has meaning.
   - GitHub Alerts (`> [!CAUTION]` etc.) provide native colored callouts.
   - Shields.io badges give the top of the comment a professional header.
+  - Every comment links back to the chat with the PR pre-filled, so anyone
+    reading it can ask Lya follow-up questions.
 
-The vibe: a senior engineer who has seen everything, doesn't panic, and
-enjoys their job. Direct, dry, occasionally funny, never unprofessional.
+Environment variables:
+    GITHUB_TOKEN          — GitHub API token
+    SPECTRE_PUBLIC_URL    — Base URL of the deployed app (optional).
+                            If set, chat deep-links are full URLs.
+                            If not set, the signature degrades to text.
 """
 
 import hashlib
 import os
 import random
 from datetime import datetime, timezone
-from typing import Any
+from urllib.parse import quote
 
 from github import Auth, Github, GithubException
 
@@ -42,12 +47,7 @@ MAX_AFFECTED_SERVICES_SHOWN = 25
 # Deterministic randomization
 # ---------------------------------------------------------------------------
 def _seed_for(*parts) -> random.Random:
-    """
-    Build a Random instance seeded by the given parts.
-
-    Ensures the same PR always gets the same comment. Different PRs get
-    different comments. Deterministic, testable, and pleasant to demo.
-    """
+    """Build a Random instance seeded by the given parts."""
     material = "|".join(str(p) for p in parts).encode("utf-8")
     digest = hashlib.sha256(material).hexdigest()
     seed = int(digest[:16], 16)
@@ -55,7 +55,7 @@ def _seed_for(*parts) -> random.Random:
 
 
 # ---------------------------------------------------------------------------
-# Variation pools — grouped by severity tier
+# Variation pools
 # ---------------------------------------------------------------------------
 GREETINGS_BY_SEVERITY = {
     "Critical": [
@@ -161,19 +161,7 @@ def format_analysis_comment(
     code_review: dict | None = None,
     pr_number: int | None = None,
 ) -> str:
-    """
-    Build the full PR comment. Varies per PR via deterministic seeding.
-
-    Args:
-        bfs_result: Output of analyze_impact().
-        ai_result: Output of generate_insights().
-        code_review: Output of generate_code_review() or None.
-        pr_number: Optional PR number used to seed the randomization so
-                   the same PR always gets the same comment.
-
-    Returns:
-        Markdown string, ready for GitHub.
-    """
+    """Build the full PR comment. Varies per PR via deterministic seeding."""
     severity = ai_result.get("severity", "Unknown") or "Unknown"
     rng = _seed_for(pr_number, severity, bfs_result.get("changed_resource", ""))
 
@@ -215,7 +203,7 @@ def format_analysis_comment(
         "",
         _build_next_steps_section(next_opener, severity, affected_services, code_review),
         "",
-        _build_signature(signoff),
+        _build_signature(signoff, pr_number=pr_number, changed_resource=changed_resource),
     ]
 
     comment = "\n".join(s for s in sections if s is not None).strip()
@@ -251,7 +239,6 @@ def _build_badges(severity: str, risk_score: int, business_impact: int) -> str:
 
 
 def _build_headline(changed_resource: str, affected_count: int, business_impact: int) -> str:
-    """One-line summary. Reads like a tweet."""
     if affected_count == 0:
         return f"Your change to `{changed_resource}` didn't resolve to any tracked service. Nothing to see here."
     return (
@@ -261,7 +248,6 @@ def _build_headline(changed_resource: str, affected_count: int, business_impact:
 
 
 def _build_alert(severity: str) -> str:
-    """GitHub-native alert box, matched to severity."""
     if severity == "Critical":
         return (
             "> [!CAUTION]\n"
@@ -289,7 +275,6 @@ def _build_alert(severity: str) -> str:
 
 
 def _build_blast_radius_table(affected_services: list[str], business_impact: int) -> str:
-    """Blast radius as a table with impact meter."""
     meter = _render_impact_meter(business_impact)
     lines: list[str] = [
         "### 📡 Blast Radius",
@@ -302,7 +287,6 @@ def _build_blast_radius_table(affected_services: list[str], business_impact: int
         lines.append("_No affected services were detected._")
         return "\n".join(lines)
 
-    # Render services as a table. If we have many, cap and roll the rest.
     inline = affected_services[:MAX_AFFECTED_SERVICES_SHOWN]
     rest = affected_services[MAX_AFFECTED_SERVICES_SHOWN:]
 
@@ -319,7 +303,6 @@ def _build_blast_radius_table(affected_services: list[str], business_impact: int
 
 
 def _build_evidence_section(evidence: list, opener: str) -> str:
-    """Evidence chain in a collapsible, with a fixed-width code block."""
     paths = [p for p in evidence if isinstance(p, list) and p]
     if not paths:
         return ""
@@ -346,16 +329,13 @@ def _build_evidence_section(evidence: list, opener: str) -> str:
 
 
 def _build_simulation_section(simulation: str, opener: str) -> str:
-    """AI simulation as a blockquote. Personality comes from the opener."""
     if not simulation or not simulation.strip():
         return ""
-
     quoted = "\n".join(f"> {line}" for line in simulation.strip().splitlines())
     return f"### {opener}\n\n{quoted}"
 
 
 def _build_code_review_section(code_review: dict | None) -> str:
-    """Code review, collapsible, with counts and emoji markers."""
     if not code_review:
         return ""
 
@@ -463,16 +443,42 @@ def _build_next_steps_section(
     return "\n".join(lines)
 
 
-def _build_signature(signoff: str) -> str:
+def _build_signature(
+    signoff: str,
+    pr_number: int | None = None,
+    changed_resource: str = "",
+) -> str:
+    """
+    Signature footer with an optional chat deep-link.
+
+    If SPECTRE_PUBLIC_URL is set, includes a clickable link that opens
+    the chat with the PR number and a suggested question pre-filled.
+    Otherwise, degrades to text-only.
+    """
     base_url = (os.getenv("SPECTRE_PUBLIC_URL") or "").strip().rstrip("/")
     timestamp = datetime.now(timezone.utc).strftime("%Y-%m-%d %H:%M UTC")
-    chat_link = (
-        f"[💬 Ask Lya about this change]({base_url}/chat)"
-        if base_url else "💬 Ask Lya in the chat endpoint"
-    )
+
+    if base_url and pr_number:
+        if changed_resource and changed_resource != "unknown":
+            question = f"why is {changed_resource} risky?"
+        else:
+            question = "what should I know about this change?"
+        encoded_q = quote(question, safe="")
+
+        chat_link = (
+            f"💬 [Ask Lya about this change →]"
+            f"({base_url}/chat?q={encoded_q}&pr={pr_number}&lang=en)"
+        )
+        return (
+            "---\n\n"
+            f"{chat_link}\n\n"
+            f"*🤖 Spectre Impact · {timestamp}*\n\n"
+            f"<sub>{signoff}</sub>"
+        )
+
     return (
         "---\n\n"
-        f"*🤖 Spectre Impact · {timestamp} · {chat_link}*\n\n"
+        f"*🤖 Spectre Impact · {timestamp}*\n\n"
         f"<sub>{signoff}</sub>"
     )
 
@@ -501,7 +507,6 @@ def _render_impact_meter(percent: int) -> str:
 
 
 def _impact_marker_for_service(index: int, total: int) -> str:
-    """Assign a visually descending marker to services by position."""
     if total == 0:
         return "⚪"
     ratio = index / total
@@ -557,11 +562,9 @@ def post_github_comment(
     ai_result: dict,
     code_review: dict | None = None,
 ) -> None:
-    """Post the analysis as a PR comment. Never raises."""
     if not GITHUB_TOKEN:
         print("GITHUB_TOKEN not set — skipping comment post.")
         return
-
     try:
         gh = _get_github()
         repo = gh.get_repo(repo_name)
@@ -576,11 +579,9 @@ def post_github_comment(
 
 
 def get_pr_for_branch(repo_name: str, branch: str) -> int | None:
-    """Find the open PR number for a branch, or None."""
     if not GITHUB_TOKEN:
         print("GITHUB_TOKEN not set — skipping PR lookup.")
         return None
-
     try:
         gh = _get_github()
         repo = gh.get_repo(repo_name)
@@ -605,14 +606,11 @@ def post_inline_comment(
     suggestion: str,
     severity: str,
 ) -> None:
-    """Post an inline comment on a specific line of a commit."""
     if not GITHUB_TOKEN:
         print("GITHUB_TOKEN not set — skipping inline comment post.")
         return
-
     marker = {"Critical": "🔴", "High": "🟠", "Medium": "🟡", "Low": "🟢"}.get(severity, "⚪")
     body = f"{marker} **{severity}** — {suggestion}"
-
     try:
         gh = _get_github()
         repo = gh.get_repo(repo_name)
@@ -626,11 +624,9 @@ def post_inline_comment(
 
 
 def fetch_commit_diff(repo_name: str, commit_sha: str) -> str:
-    """Fetch the unified diff for a commit. Returns '' on failure."""
     if not GITHUB_TOKEN:
         print("GITHUB_TOKEN not set — cannot fetch diff.")
         return ""
-
     try:
         gh = _get_github()
         repo = gh.get_repo(repo_name)
@@ -677,12 +673,12 @@ if __name__ == "__main__":
         "suggestions": ["Move credentials to environment variables"],
     }
 
-    # Render 3 variants for the same PR — should be identical (deterministic)
-    for pr in (5, 5, 5):
-        body = format_analysis_comment(sample_bfs, sample_ai, sample_review, pr_number=pr)
-        print(f"PR #{pr}: {len(body)} chars, seed preview: {body[200:400].strip()[:80]!r}")
-    print()
+    print("--- Without SPECTRE_PUBLIC_URL ---")
+    body1 = format_analysis_comment(sample_bfs, sample_ai, sample_review, pr_number=5)
+    print(body1[-500:])
 
-    # Show full output for PR #5
-    full = format_analysis_comment(sample_bfs, sample_ai, sample_review, pr_number=5)
-    print(full)
+    os.environ["SPECTRE_PUBLIC_URL"] = "https://spectre.example.com"
+    print()
+    print("--- With SPECTRE_PUBLIC_URL=https://spectre.example.com ---")
+    body2 = format_analysis_comment(sample_bfs, sample_ai, sample_review, pr_number=5)
+    print(body2[-500:])
