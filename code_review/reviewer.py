@@ -14,7 +14,8 @@ from typing import Any
 import os
 import signal
 
-from ai_agent_groq import generate_text
+
+from ai.multi_provider import call_ai
 
 
 def _run(command: list[str], timeout: int = 60) -> dict[str, Any]:
@@ -43,10 +44,23 @@ def _run(command: list[str], timeout: int = 60) -> dict[str, Any]:
                     stdout=subprocess.DEVNULL,
                     stderr=subprocess.DEVNULL,
                 )
+                try:
+                    proc.kill()
+                except Exception:
+                    pass
             else:
-                os.killpg(os.getpgid(proc.pid), signal.SIGKILL)
+                try:
+                    os.killpg(os.getpgid(proc.pid), signal.SIGKILL)
+                except Exception:
+                    try:
+                        proc.kill()
+                    except Exception:
+                        pass
 
-            stdout, stderr = proc.communicate()
+            try:
+                stdout, stderr = proc.communicate(timeout=5)
+            except Exception:
+                stdout, stderr = "", ""
 
             return {
                 "status": "error",
@@ -82,7 +96,7 @@ def _run(command: list[str], timeout: int = 60) -> dict[str, Any]:
     }
 
 def extract_changed_files(diff: str, repo_path: str | Path = ".") -> list[str]:
-    """Extract real changed file paths from a unified diff."""
+    """Extract real changed file paths from a unified diff safely."""
 
     root = Path(repo_path).resolve()
     files: list[str] = []
@@ -91,21 +105,28 @@ def extract_changed_files(diff: str, repo_path: str | Path = ".") -> list[str]:
         if not line.startswith("+++ "):
             continue
 
-        path = line[4:].strip()
+        path = line[4:].split("\t")[0].strip()
 
         # Skip deleted files.
         if path == "/dev/null":
             continue
 
         # Unified diffs normally use a/ and b/ prefixes.
-        if path.startswith("b/"):
+        if path.startswith("b/") or path.startswith("a/"):
             path = path[2:]
 
-        candidate = (root / path).resolve()
+        if not path:
+            continue
 
         try:
+            clean_path = Path(path)
+            if clean_path.is_absolute():
+                candidate = clean_path.resolve()
+            else:
+                candidate = (root / clean_path).resolve()
+
             candidate.relative_to(root.resolve())
-        except ValueError:
+        except (ValueError, RuntimeError):
             continue
 
         if candidate.is_file():
@@ -155,8 +176,20 @@ def run_radon(
     return _run(command, timeout=120)
 
 
-def ai_code_review(diff: str) -> dict[str, Any]:
-    prompt = """Review the following code diff for correctness, security,
+def ai_code_review(diff: str, affected_services: list[str] | None = None) -> dict[str, Any]:
+    rag_context = ""
+    try:
+        from rag.retriever import build_context
+        query = diff[:1000] if diff else ""
+        rag_context = build_context(query=query, affected_services=affected_services, max_docs=6)
+    except Exception:
+        rag_context = ""
+
+    prompt_parts = []
+    if rag_context and rag_context.strip():
+        prompt_parts.append("PROJECT CONTEXT (for background knowledge only):\n" + rag_context)
+
+    prompt_parts.append("""Review the following code diff for correctness, security,
 reliability, and maintainability.
 
 Return concise findings with:
@@ -165,19 +198,32 @@ Return concise findings with:
 - problem
 - concrete fix
 
-Do not claim a vulnerability unless the diff supports it.
+Do not claim a vulnerability unless the diff supports it. The diff itself is authoritative.
 
 DIFF:
-""" + diff[:12000]
+""" + diff[:12000])
+
+    prompt = "\n\n".join(prompt_parts)
 
     try:
-        response = generate_text(prompt)
+        response = call_ai(prompt)
+
+        if response.get("provider") == "fallback":
+            return {
+                "status": "unavailable",
+                "review": "AI review unavailable.",
+                "error": response.get("metadata", {}).get(
+                    "reason",
+                    "all_providers_failed",
+                ),
+            }
 
         return {
             "status": "ok",
-            "provider": response.provider,
-            "model": response.model,
-            "review": response.text,
+            "provider": response.get("provider"),
+            "model": response.get("model"),
+            "review": response.get("text", ""),
+            "rag_context_used": bool(rag_context),
         }
 
     except Exception as exc:
@@ -191,8 +237,10 @@ DIFF:
 def full_review(
     diff: str,
     repo_path: str | Path = ".",
+    affected_services: list[str] | None = None,
 ) -> dict[str, Any]:
-    """Run static analysis against files actually changed by the diff."""
+    """Run static analysis against files actually changed by the diff and AI review."""
+    from code_review.severity import normalize_tool_findings
 
     changed_files = extract_changed_files(diff, repo_path)
 
@@ -210,14 +258,21 @@ def full_review(
                 "status": "skipped",
                 "error": "No existing changed files found in diff.",
             },
-            "ai_review": ai_code_review(diff),
+            "ai_review": ai_code_review(diff, affected_services=affected_services),
             "changed_files": [],
         }
 
+    semgrep_res = normalize_tool_findings("semgrep", run_semgrep(changed_files))
+    bandit_res = normalize_tool_findings("bandit", run_bandit(changed_files))
+    radon_res = normalize_tool_findings("radon", run_radon(changed_files))
+    ai_res = ai_code_review(diff, affected_services=affected_services)
+
     return {
-        "semgrep": run_semgrep(changed_files),
-        "bandit": run_bandit(changed_files),
-        "radon": run_radon(changed_files),
-        "ai_review": ai_code_review(diff),
+        "semgrep": semgrep_res,
+        "bandit": bandit_res,
+        "radon": radon_res,
+        "ai_review": ai_res,
         "changed_files": changed_files,
     }
+
+

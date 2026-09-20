@@ -35,7 +35,13 @@ def enrich_repository(repository_root: str | Path = ".", store: VectorStore | No
     count = 0
     # Service/business knowledge.
     graph_path = data_dir / "dependency_graph.yaml"
+    if not graph_path.exists():
+        graph_path = root / "dependency_graph.yaml"
+
     business_path = data_dir / "business_map.yaml"
+    if not business_path.exists():
+        business_path = root / "business_map.yaml"
+
     if graph_path.exists():
         graph = yaml.safe_load(graph_path.read_text(encoding="utf-8")) or {}
         for name, node in graph.get("nodes", {}).items():
@@ -51,23 +57,26 @@ def enrich_repository(repository_root: str | Path = ".", store: VectorStore | No
             count += 1
 
     # Repository source chunks become retrieval context for code questions.
-    skipped = {".git", ".venv", "venv", "node_modules", "__pycache__", ".spectre", ".pytest_cache"}
+    skipped = {".git", ".venv", "venv", "node_modules", "__pycache__", ".spectre", ".pytest_cache", "build", "dist"}
     for path in root.rglob("*"):
         if not path.is_file() or path.suffix.lower() not in {".py", ".js", ".jsx", ".ts", ".tsx", ".yaml", ".yml", ".json", ".md", ".tf"}:
             continue
-        if any(part in skipped for part in path.parts):
+        if any(part in skipped or part.endswith(".egg-info") for part in path.parts):
             continue
         try:
             text = path.read_text(encoding="utf-8", errors="ignore")
         except OSError:
             continue
+
         for idx, chunk in enumerate(_chunks(text)):
             digest = hashlib.sha256(f"{path}:{idx}:{chunk}".encode()).hexdigest()[:16]
-            store.add(f"source:{digest}", f"File: {path.relative_to(root)}\n\n{chunk}", {"path": str(path.relative_to(root)), "doc_type": "source"})
+            try:
+                rel_path = str(path.relative_to(root))
+            except ValueError:
+                rel_path = str(path)
+            store.add(f"source:{digest}", f"File: {rel_path}\n\n{chunk}", {"path": rel_path, "doc_type": "source"})
             count += 1
 
-    # Optional deterministic synthetic runbook records make the CLI useful on a
-    # small demo repository without pretending they came from production data.
     if target_docs and count < target_docs:
         graph = yaml.safe_load(graph_path.read_text(encoding="utf-8")) if graph_path.exists() else {"nodes": {}}
         nodes = list((graph or {}).get("nodes", {})) or ["application"]
@@ -83,6 +92,7 @@ def enrich_repository(repository_root: str | Path = ".", store: VectorStore | No
             count += 1
             idx += 1
     return count
+
 
 
 if __name__ == "__main__":

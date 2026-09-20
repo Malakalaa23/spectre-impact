@@ -5,3 +5,4 @@ __pycache__/
 .env
 .spectre/
 *.egg-info/
+history.db

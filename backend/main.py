@@ -40,11 +40,42 @@ class ChatRequest(BaseModel):
 class VoiceRequest(BaseModel):
     text: str | None = None
     voice: str = "default"
+    language: str = "en"
 
 
 @app.get("/health")
 def health() -> dict[str, str]:
     return {"status": "ok"}
+
+
+@app.get("/api/live-feed")
+def live_feed(limit: int = 20) -> dict[str, Any]:
+    import database
+    analyses = database.get_all_analyses(limit=limit)
+    commits = database.get_all_commit_analyses(limit=limit)
+    events = []
+    for a in analyses:
+        events.append({
+            "id": f"pr-{a.get('id')}",
+            "type": "pr_analysis",
+            "pr_number": a.get("pr_number"),
+            "repo_name": a.get("repo_name"),
+            "severity": a.get("severity"),
+            "business_impact": a.get("business_impact"),
+            "timestamp": a.get("created_at"),
+        })
+    for c in commits:
+        events.append({
+            "id": f"commit-{c.get('id')}",
+            "type": "commit_analysis",
+            "commit_sha": c.get("commit_sha"),
+            "repo_name": c.get("repo_name"),
+            "branch": c.get("branch"),
+            "business_impact": c.get("business_impact"),
+            "timestamp": c.get("created_at"),
+        })
+    events.sort(key=lambda x: str(x.get("timestamp") or ""), reverse=True)
+    return {"status": "ok", "events": events[:limit]}
 
 
 @app.post("/api/analyze")
@@ -74,19 +105,39 @@ def chat(request: ChatRequest) -> dict[str, Any]:
     return {"session_id": session_id, "provider": response.provider, "model": response.model, "message": response.text, "history_size": len(history) + 2, "session_backend": sessions.backend}
 
 
+@app.post("/api/tts")
+def tts_endpoint(request: VoiceRequest):
+    text = (request.text or "").strip()
+    if not text:
+        raise HTTPException(status_code=400, detail="text is required for TTS endpoint")
+    try:
+        path = text_to_speech(text, request.voice, language=request.language, fallback_level="unknown")
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+    except RuntimeError as exc:
+        try:
+            path = fallback_audio("unknown")
+        except RuntimeError:
+            raise HTTPException(status_code=503, detail=str(exc)) from exc
+    return FileResponse(path, media_type="audio/mpeg", filename="spectre-tts.mp3")
+
+
 @app.post("/api/voice/{pr_number}")
 def voice(pr_number: int, request: VoiceRequest):
     text = (request.text or "").strip()
     if not text:
         raise HTTPException(status_code=400, detail="text is required for this stateless endpoint")
     try:
-        path = text_to_speech(text, request.voice, fallback_level="unknown")
+        path = text_to_speech(text, request.voice, language=request.language, fallback_level="unknown")
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
     except (RuntimeError, ValueError) as exc:
         try:
             path = fallback_audio("unknown")
         except RuntimeError:
             raise HTTPException(status_code=503, detail=str(exc)) from exc
     return FileResponse(path, media_type="audio/mpeg", filename=f"spectre-pr-{pr_number}.mp3")
+
 
 
 def _valid_signature(raw: bytes, signature: str | None) -> bool:

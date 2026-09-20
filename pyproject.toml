@@ -37,7 +37,12 @@ include = [
     "rag.*",
     "voice",
     "voice.*",
+    "ai",
+    "ai.*",
+    "chat",
+    "chat.*",
 ]
+
 
 [tool.setuptools]
 py-modules = ["ai_agent_groq"]

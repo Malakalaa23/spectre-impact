@@ -38,10 +38,15 @@ def run(base: str = typer.Option("main", help="Git base ref"), head: Optional[st
     if analysis["unknown_resources"]:
         console.print(f"[yellow]Unknown:[/] {', '.join(analysis['unknown_resources'])}")
     ai = generate_insights(analysis["affected_nodes"], analysis["business_impact"], context=analysis)
-    console.print(Panel(
+    from chat.safety import sanitize_output
+    raw_guidance = (
         f"[bold]Severity:[/] {ai['severity']}\n"
         f"[bold]Simulation:[/] {ai['simulation']}\n"
         f"[bold]Rollback:[/] {ai['rollback']}\n"
-        f"[bold]Validation:[/] {ai['validation']}",
+        f"[bold]Validation:[/] {ai['validation']}"
+    )
+    console.print(Panel(
+        sanitize_output(raw_guidance),
         title="AI Guidance",
     ))
+

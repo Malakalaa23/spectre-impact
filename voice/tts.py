@@ -18,6 +18,10 @@ VOICES = {
     "executive": "nova",
     "critical": "echo",
     "default": "alloy",
+    "ar-eg-female": "nova",
+    "ar-eg-male": "onyx",
+    "arabic": "nova",
+    "english": "alloy",
 }
 
 CACHE_DIR = Path(os.getenv("SPECTRE_VOICE_CACHE", ".spectre/voice_cache"))
@@ -40,14 +44,29 @@ def fallback_audio(level: str = "unknown") -> str:
     return str(path)
 
 
-def text_to_speech(text: str, voice_key: str = "default", *, output_dir: str | Path | None = None, fallback_level: str | None = None) -> str:
+def text_to_speech(
+    text: str,
+    voice_key: str = "default",
+    *,
+    language: str = "en",
+    output_dir: str | Path | None = None,
+    fallback_level: str | None = None,
+) -> str:
     text = text.strip()
     if not text:
         raise ValueError("Text is empty")
+
+    lang = (language or "en").lower().strip()
+    if lang not in ("en", "english", "ar", "ar-eg", "arabic", "egyptian_arabic"):
+        raise ValueError(f"Unsupported language: {language}")
+
+    if lang in ("ar", "ar-eg", "arabic", "egyptian_arabic") and voice_key == "default":
+        voice_key = "ar-eg-female"
+
     voice = VOICES.get(voice_key, VOICES["default"])
     directory = Path(output_dir) if output_dir else CACHE_DIR
     directory.mkdir(parents=True, exist_ok=True)
-    cache_key = hashlib.sha256(f"{text}\n{voice}".encode("utf-8")).hexdigest()[:24]
+    cache_key = hashlib.sha256(f"{text}\n{voice}\n{lang}".encode("utf-8")).hexdigest()[:24]
     output_file = directory / f"{cache_key}_{_safe_name(voice)}.mp3"
     if output_file.exists():
         return str(output_file)
@@ -78,3 +97,4 @@ def text_to_speech(text: str, voice_key: str = "default", *, output_dir: str | P
         if fallback_level:
             return fallback_audio(fallback_level)
         raise
+

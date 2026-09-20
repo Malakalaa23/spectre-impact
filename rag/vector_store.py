@@ -33,24 +33,31 @@ class VectorStore:
         return self._collection is not None
 
     def add(self, doc_id: str, text: str, metadata: dict[str, Any] | None = None) -> None:
-        if not text.strip():
+        if not text or not text.strip():
             return
-        if not metadata:
-            metadata = {"doc_type": "general"}
 
-        metadata = {
-            k: (
-                v if isinstance(v, (str, int, float, bool))
-                else json.dumps(v)
-            )
-            for k, v in metadata.items()
-        }
+        meta = dict(metadata or {})
+        if not meta:
+            meta = {"doc_type": "general"}
+
+        clean_meta = {}
+        for k, v in meta.items():
+            if v is None:
+                clean_meta[k] = ""
+            elif isinstance(v, (str, int, float, bool)):
+                clean_meta[k] = v
+            else:
+                clean_meta[k] = json.dumps(v)
+
+        if not clean_meta:
+            clean_meta = {"doc_type": "general"}
+
         with _LOCK:
             if self._collection is not None:
-                self._collection.upsert(ids=[doc_id], documents=[text], metadatas=[metadata])
+                self._collection.upsert(ids=[doc_id], documents=[text], metadatas=[clean_meta])
                 return
             data = self._read_fallback()
-            data[doc_id] = {"text": text, "metadata": metadata}
+            data[doc_id] = {"text": text, "metadata": clean_meta}
             self._fallback.write_text(json.dumps(data, indent=2), encoding="utf-8")
 
     def count(self) -> int:
@@ -58,26 +65,51 @@ class VectorStore:
             return self._collection.count() if self._collection is not None else len(self._read_fallback())
 
     def query(self, query: str, n_results: int = 5) -> list[dict[str, Any]]:
-        if self._collection is not None:
-            result = self._collection.query(query_texts=[query], n_results=max(1, n_results))
-            ids = result.get("ids", [[]])[0]
-            docs = result.get("documents", [[]])[0]
-            metas = result.get("metadatas", [[]])[0]
-            distances = result.get("distances", [[]])[0] if result.get("distances") else []
-            return [
-                {"id": i, "text": d, "metadata": m or {}, "distance": distances[idx] if idx < len(distances) else None}
-                for idx, (i, d, m) in enumerate(zip(ids, docs, metas))
-            ]
-        # Tiny lexical fallback: deterministic and dependency-free.
-        terms = {term.lower() for term in query.split() if term.strip()}
-        rows = []
-        for doc_id, item in self._read_fallback().items():
-            text = item["text"].lower()
-            score = sum(term in text for term in terms)
-            if score:
-                rows.append((score, doc_id, item))
-        rows.sort(reverse=True)
-        return [{"id": doc_id, **item, "score": score} for score, doc_id, item in rows[:n_results]]
+        res = self.search_similar(query, n_results=n_results)
+        ids = (res.get("ids") or [[]])[0]
+        docs = (res.get("documents") or [[]])[0]
+        metas = (res.get("metadatas") or [[]])[0]
+        distances = (res.get("distances") or [[]])[0]
+        return [
+            {"id": i, "text": d, "metadata": m or {}, "distance": distances[idx] if idx < len(distances) else None}
+            for idx, (i, d, m) in enumerate(zip(ids, docs, metas))
+        ]
+
+    def search_similar(self, query: str, n_results: int = 5, doc_type: str | None = None) -> dict[str, list[list[Any]]]:
+        n_results = max(1, n_results)
+        with _LOCK:
+            if self._collection is not None:
+                where = {"doc_type": doc_type} if doc_type else None
+                try:
+                    res = self._collection.query(query_texts=[query], n_results=n_results, where=where)
+                    return {
+                        "ids": res.get("ids") or [[]],
+                        "documents": res.get("documents") or [[]],
+                        "metadatas": res.get("metadatas") or [[]],
+                        "distances": res.get("distances") or [[]],
+                    }
+                except Exception:
+                    pass
+
+            terms = {term.lower() for term in query.split() if term.strip()}
+            rows = []
+            for doc_id, item in self._read_fallback().items():
+                meta = item.get("metadata", {})
+                if doc_type and meta.get("doc_type") != doc_type and meta.get("type") != doc_type:
+                    continue
+                text = item.get("text", "").lower()
+                score = sum(term in text for term in terms)
+                rows.append((score, doc_id, item.get("text", ""), meta))
+
+            rows.sort(key=lambda x: x[0], reverse=True)
+            selected = rows[:n_results]
+
+            ids = [r[1] for r in selected]
+            docs = [r[2] for r in selected]
+            metas = [r[3] for r in selected]
+            distances = [1.0 / (r[0] + 1) for r in selected]
+
+            return {"ids": [ids], "documents": [docs], "metadatas": [metas], "distances": [distances]}
 
     def _read_fallback(self) -> dict[str, Any]:
         if not self._fallback.exists():
@@ -107,3 +139,8 @@ def add_document(doc_id: str, text: str, metadata: dict[str, Any] | None = None,
 
 def query_documents(query: str, n_results: int = 5) -> list[dict[str, Any]]:
     return get_store().query(query, n_results)
+
+
+def search_similar(query: str, n_results: int = 5, doc_type: str | None = None) -> dict[str, list[list[Any]]]:
+    return get_store().search_similar(query, n_results=n_results, doc_type=doc_type)
+

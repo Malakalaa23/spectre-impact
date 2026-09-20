@@ -116,10 +116,12 @@ def run(
         _print_findings(tool, result[tool])
 
     ai = result["ai_review"]
+    raw_review = ai.get("review", "AI review unavailable.")
+    from chat.safety import sanitize_output
 
     console.print(
         Panel(
-            ai.get("review", "AI review unavailable."),
+            sanitize_output(raw_review),
             title="AI Code Review",
         )
-    )
+    )

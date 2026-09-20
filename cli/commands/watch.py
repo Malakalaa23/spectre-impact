@@ -1,30 +1,59 @@
-from __future__ import annotations
-
+import json
+import os
 import time
+import urllib.error
+import urllib.request
 
 import typer
 from rich.console import Console
 
-from backend.analysis.change_analysis_engine import analyze_impact
-
 console = Console()
 
 
-def run(base: str = typer.Option("main"), interval: int = typer.Option(10, min=2, help="Seconds between checks")) -> None:
-    console.print(f"Watching git changes against [cyan]{base}[/]. Press Ctrl+C to stop.")
-    previous: tuple[str, ...] = ()
+def run(
+    url: str = typer.Option(
+        os.getenv("SPECTRE_API_URL", "http://localhost:8000"),
+        help="Spectre backend URL",
+    ),
+    interval: int = typer.Option(5, min=1, help="Seconds between checks"),
+    once: bool = typer.Option(False, help="Poll once and exit"),
+) -> None:
+    endpoint = f"{url.rstrip('/')}/api/live-feed"
+    console.print(f"Watching live feed from [cyan]{endpoint}[/]. Press Ctrl+C to stop.")
+    seen_ids: set[str] = set()
+
     try:
         while True:
-            import subprocess
-            proc = subprocess.run(["git", "diff", "--name-only", base], capture_output=True, text=True)
-            files = tuple(sorted(f for f in proc.stdout.splitlines() if f.strip()))
-            if files != previous:
-                previous = files
-                if files:
-                    result = analyze_impact(list(files))
-                    console.print(f"[cyan]Change detected:[/] {len(files)} files | impact={result['business_impact']}% | severity={result['severity']}")
-                else:
-                    console.print("[dim]Working tree is clean.[/]")
+            try:
+                req = urllib.request.Request(endpoint, headers={"User-Agent": "Spectre-CLI"})
+                with urllib.request.urlopen(req, timeout=5) as resp:
+                    if resp.status == 200:
+                        data = json.loads(resp.read().decode("utf-8"))
+                        events = data.get("events", []) if isinstance(data, dict) else []
+                        new_events = [e for e in events if isinstance(e, dict) and e.get("id") not in seen_ids]
+
+                        for event in reversed(new_events):
+                            event_id = event.get("id")
+                            if event_id:
+                                seen_ids.add(event_id)
+                            event_type = event.get("type", "event")
+                            severity = event.get("severity") or "info"
+                            impact = event.get("business_impact", 0)
+                            console.print(
+                                f"[cyan]LIVE EVENT:[/] [{event_type}] id={event_id} | "
+                                f"impact={impact}% | severity={severity}"
+                            )
+                    else:
+                        console.print(f"[yellow]Backend returned HTTP {resp.status}[/]")
+            except (urllib.error.URLError, TimeoutError, OSError) as exc:
+                console.print(f"[yellow]Connection warning:[/] Could not reach {endpoint} ({exc})")
+            except json.JSONDecodeError:
+                console.print(f"[yellow]Malformed response from {endpoint}[/]")
+
+            if once:
+                break
             time.sleep(interval)
+
     except KeyboardInterrupt:
-        console.print("\nStopped.")
+        console.print("\nStopped watching.")
+
