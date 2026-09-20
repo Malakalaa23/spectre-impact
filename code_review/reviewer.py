@@ -11,33 +11,56 @@ import re
 import subprocess
 from pathlib import Path
 from typing import Any
+import os
+import signal
 
 from ai_agent_groq import generate_text
 
 
 def _run(command: list[str], timeout: int = 60) -> dict[str, Any]:
+    creationflags = 0
+
+    if os.name == "nt":
+        creationflags = subprocess.CREATE_NEW_PROCESS_GROUP
+
     try:
-        proc = subprocess.run(
+        proc = subprocess.Popen(
             command,
-            capture_output=True,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
             text=True,
             encoding="utf-8",
             errors="replace",
-            timeout=timeout,
+            creationflags=creationflags,
         )
+
+        try:
+            stdout, stderr = proc.communicate(timeout=timeout)
+        except subprocess.TimeoutExpired:
+            if os.name == "nt":
+                subprocess.run(
+                    ["taskkill", "/F", "/T", "/PID", str(proc.pid)],
+                    stdout=subprocess.DEVNULL,
+                    stderr=subprocess.DEVNULL,
+                )
+            else:
+                os.killpg(os.getpgid(proc.pid), signal.SIGKILL)
+
+            stdout, stderr = proc.communicate()
+
+            return {
+                "status": "error",
+                "error": f"{command[0]} timed out",
+            }
+
     except FileNotFoundError:
         return {
             "status": "skipped",
             "error": f"{command[0]} is not installed",
         }
-    except subprocess.TimeoutExpired:
-        return {
-            "status": "error",
-            "error": f"{command[0]} timed out",
-        }
 
-    stdout = proc.stdout or ""
-    stderr = proc.stderr or ""
+    stdout = stdout or ""
+    stderr = stderr or ""
 
     if proc.returncode not in (0, 1, 2):
         return {
@@ -57,7 +80,6 @@ def _run(command: list[str], timeout: int = 60) -> dict[str, Any]:
         "results": parsed,
         "stderr": stderr[-2000:],
     }
-
 
 def extract_changed_files(diff: str, repo_path: str | Path = ".") -> list[str]:
     """Extract real changed file paths from a unified diff."""
@@ -79,7 +101,12 @@ def extract_changed_files(diff: str, repo_path: str | Path = ".") -> list[str]:
         if path.startswith("b/"):
             path = path[2:]
 
-        candidate = root / path
+        candidate = (root / path).resolve()
+
+        try:
+            candidate.relative_to(root.resolve())
+        except ValueError:
+            continue
 
         if candidate.is_file():
             files.append(str(candidate))

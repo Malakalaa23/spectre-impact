@@ -35,7 +35,16 @@ class VectorStore:
     def add(self, doc_id: str, text: str, metadata: dict[str, Any] | None = None) -> None:
         if not text.strip():
             return
-        metadata = {k: (v if isinstance(v, (str, int, float, bool)) else json.dumps(v)) for k, v in (metadata or {}).items()}
+        if not metadata:
+            metadata = {"doc_type": "general"}
+
+        metadata = {
+            k: (
+                v if isinstance(v, (str, int, float, bool))
+                else json.dumps(v)
+            )
+            for k, v in metadata.items()
+        }
         with _LOCK:
             if self._collection is not None:
                 self._collection.upsert(ids=[doc_id], documents=[text], metadatas=[metadata])

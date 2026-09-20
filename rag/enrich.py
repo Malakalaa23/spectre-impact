@@ -30,9 +30,7 @@ def _chunks(text: str, size: int = 1800) -> list[str]:
 def enrich_repository(repository_root: str | Path = ".", store: VectorStore | None = None, *, target_docs: int = 0) -> int:
     root = Path(repository_root).resolve()
     store = store or VectorStore()
-    data_dir = Path(__file__).resolve().parents[1] / "backend" / "data"
-    if not data_dir.exists():
-        data_dir = root / "backend" / "data"
+    data_dir = root / "backend" / "data"
 
     count = 0
     # Service/business knowledge.
