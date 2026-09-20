@@ -1,4 +1,5 @@
 import streamlit as st
+import html
 
 try:
     from streamlit_autorefresh import st_autorefresh
@@ -9,6 +10,7 @@ from data import get_pr_data, get_metrics, get_recent_activity
 from filters import filter_prs
 from realtime import get_live_events, get_team_messages, add_team_message, get_realtime_status
 from style import apply_style, sidebar, clean_html, metric_card, empty_state, severity_badge_html
+from api_client import get_json_detailed
 
 st.set_page_config(
     page_title="Spectre Impact — Developer Dashboard",
@@ -19,6 +21,7 @@ st.set_page_config(
 
 apply_style()
 sidebar("Dashboard")
+backend_ok, _, _ = get_json_detailed("/ping")
 
 # Refresh the developer dashboard automatically. If the optional package is
 # unavailable, the page remains fully usable with the manual Refresh button.
@@ -44,44 +47,67 @@ st.markdown("---")
 # ----------------------------- Live code activity --------------------------
 st.subheader("🟢 Live Code Activity")
 
+live_feed_endpoint = "/api/live-feed"
 live_events = get_live_events(limit=12)
 if not live_events:
     st.markdown(empty_state("📭", "No live events yet", "GitHub webhook changes will appear here."), unsafe_allow_html=True)
 else:
-    for event in live_events:
-        severity = event.get("severity", "UNKNOWN")
-        files = event.get("changed_files") or ["unknown file"]
-        files_text = ", ".join(f"`{file}`" for file in files[:4])
-        with st.container(border=True):
-            c1, c2 = st.columns([4, 1])
-            with c1:
-                st.markdown(
-                    f"**👨‍💻 {event.get('author', 'Unknown Developer')}** changed {files_text} "
-                    f"in **{event.get('repository', 'Unknown Repository')}** · `{event.get('pr_number', '#?')}`"
-                )
-                st.caption(f"{event.get('commit_message', 'Code change')} · {event.get('timestamp', 'unknown time')}")
-            with c2:
-                st.markdown(severity_badge_html(severity), unsafe_allow_html=True)
-            if event.get("problem"):
-                st.warning(f"⚠️ **Potential Problem:** {event['problem']}")
-            if event.get("ai_analysis"):
-                st.info(f"🤖 **AI Analysis:** {event['ai_analysis']}")
-            services = event.get("affected_services") or []
-            if services:
-                st.caption("Affected services: " + ", ".join(services))
-            a, b, c = st.columns([1, 1, 4])
-            with a:
-                if st.button("View PR", key=f"event_view_{event.get('event_id')}", help="Open the full analysis for this pull request."):
-                    st.session_state["selected_pr"] = event.get("pr_number")
-                    st.switch_page("pages/PR_Analysis.py")
-            with b:
-                if st.button("Acknowledge", key=f"event_ack_{event.get('event_id')}", help="Mark this event as seen on this dashboard."):
-                    st.session_state[f"ack_{event.get('event_id')}"] = True
-                    st.success("Acknowledged")
-            with c:
-                if st.session_state.get(f"ack_{event.get('event_id')}"):
-                    st.caption("✅ Acknowledged by current dashboard user")
+  for event in live_events:
+    severity = event.get("severity", "UNKNOWN")
+    files = event.get("changed_files") or ["unknown file"]
+    files_text = ", ".join(f"`{file}`" for file in files[:4])
 
+    author = html.escape(str(event.get("author", "Unknown Developer")))
+    repository = html.escape(str(event.get("repository", "Unknown Repository")))
+    pr_number = html.escape(str(event.get("pr_number", "#?")))
+    commit_message = html.escape(str(event.get("commit_message", "Code change")))
+    timestamp = html.escape(str(event.get("timestamp", "unknown time")))
+
+    with st.container(border=True):
+        c1, c2 = st.columns([4, 1])
+        with c1:
+            st.markdown(
+                f"**👨‍💻 {author}** changed {files_text} "
+                f"in **{repository}** · `{pr_number}`"
+            )
+            st.caption(f"{commit_message} · {timestamp}")
+
+        with c2:
+            st.markdown(severity_badge_html(severity), unsafe_allow_html=True)
+
+        if event.get("problem"):
+            st.warning(f"⚠️ **Potential Problem:** {event['problem']}")
+
+        if event.get("ai_analysis"):
+            st.info(f"🤖 **AI Analysis:** {event['ai_analysis']}")
+
+        services = event.get("affected_services") or []
+        if services:
+            st.caption("Affected services: " + ", ".join(services))
+
+        a, b, c = st.columns([1, 1, 4])
+
+        with a:
+            if st.button(
+                "View PR",
+                key=f"event_view_{event.get('event_id')}",
+                help="Open the full analysis for this pull request.",
+            ):
+                st.session_state["selected_pr"] = event.get("pr_number")
+                st.switch_page("pages/PR_Analysis.py")
+
+        with b:
+            if st.button(
+                "Acknowledge",
+                key=f"event_ack_{event.get('event_id')}",
+                help="Mark this event as seen on this dashboard.",
+            ):
+                st.session_state[f"ack_{event.get('event_id')}"] = True
+                st.success("Acknowledged")
+
+        with c:
+            if st.session_state.get(f"ack_{event.get('event_id')}"):
+                st.caption("✅ Acknowledged by current dashboard user")
 st.markdown("---")
 
 # ----------------------------- Developer filters --------------------------
@@ -131,7 +157,8 @@ if messages:
         for message in messages[-10:]:
             st.markdown(
                 f"**{message.get('author', 'Developer')}** · "
-                f"{message.get('timestamp', '')}<br>{message.get('text', '')}",
+                  
+               f"{html.escape(message.get('timestamp', ''))}<br>{html.escape(message.get('text', ''))}",
                 unsafe_allow_html=True,
             )
 else:

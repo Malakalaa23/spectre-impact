@@ -1,14 +1,16 @@
 import os
 from io import BytesIO
 import streamlit as st
-
+from api_client import get_json_detailed
 from style import apply_style, clean_html
 
 st.set_page_config(page_title="Spectre Impact", page_icon="🚀", layout="centered", initial_sidebar_state="collapsed")
 apply_style()
 
 landing_url = os.getenv("SPECTRE_LANDING_URL", "").strip()
+presets_ok, presets, _ = get_json_detailed("/api/landing/presets")
 
+language = st.radio("Language", ["English", "مصري"], horizontal=True)
 st.markdown(clean_html("""
 <div style="text-align:center;padding:48px 15px 24px;">
     <div style="font-size:58px;">🚀</div>
@@ -16,6 +18,16 @@ st.markdown(clean_html("""
     <p style="font-size:18px;color:#94a3b8;">Know what will break before you deploy.</p>
 </div>
 """), unsafe_allow_html=True)
+
+col1, col2 = st.columns(2)
+
+with col1:
+    if st.button("Try the Chat", use_container_width=True):
+        st.switch_page("pages/Chat.py")
+
+with col2:
+    if st.button("Watch a PR Analysis", use_container_width=True):
+        st.switch_page("pages/Code_Review.py")
 
 if not landing_url:
     st.error("⚠️ SPECTRE_LANDING_URL is not configured. The QR code cannot be generated.")

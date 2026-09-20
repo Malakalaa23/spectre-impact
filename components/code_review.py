@@ -24,6 +24,7 @@ def _language_for_file(filename):
 
 
 def render_finding(finding, index):
+    """Render one code-review finding."""
     severity = str(finding.get("severity", "INFO")).upper()
     title = finding.get("title") or finding.get("message") or f"Finding {index}"
     location = finding.get("file") or finding.get("path") or ""

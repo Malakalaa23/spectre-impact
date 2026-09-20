@@ -2,6 +2,10 @@ import uuid
 import html
 import streamlit as st
 
+def detect_lang(text):
+    """Detect whether the text contains Arabic characters."""
+    return "ar" if any('\u0600' <= c <= '\u06ff' for c in text) else "en"
+
 from api_client import post_json_detailed, post_bytes, post_multipart
 from style import apply_style, sidebar, empty_state
 
@@ -11,6 +15,8 @@ sidebar("Chat")
 
 st.title("💬 Lya — Spectre Impact Assistant")
 st.caption("Ask about PR risk, blast radius, affected services, deployment validation, or rollback.")
+
+st.info("🌐 Lya responds in Arabic 🇪🇬 or English 🇬🇧 based on your message.")
 
 if "spectre_chat" not in st.session_state:
     st.session_state.spectre_chat = []
@@ -209,7 +215,7 @@ if prompt:
                 "message": prompt,
                 "session_id": st.session_state.spectre_chat_session_id,
             },
-            timeout=60,
+            timeout=180,
         )
     finally:
         typing.empty()
