@@ -5,17 +5,26 @@ Builds a LangChain 1.x agent using `langchain.agents.create_agent`, which
 returns a compiled LangGraph. The agent uses Lya's personality (from
 `chat.prompts`) and the tools from `chat.tools`.
 
+Session awareness:
+    On every chat call, the agent touches the session via `chat.memory`,
+    reads the resulting context (mood, session age, turn count, recent
+    incidents, cross-session patterns), and injects a compact context
+    block into the system prompt. This is what makes Lya feel like a
+    friend who has been paying attention.
+
+    The user's message is scanned for mood signals before touching the
+    session so the mood snapshot reflects the current turn.
+
 Runtime guard:
     Before invoking the LLM, `chat()` checks whether the user's message
     looks like an orphan follow-up — a short question that references
     prior context ("those", "that", "which of them") — while the session
     has no history. If so, it returns a clarification request without
-    calling the LLM. This guarantees the behavior even if the model
-    would otherwise answer from generic knowledge.
+    calling the LLM.
 
 Public API:
-    build_agent(tools=None)  — construct a fresh agent graph.
-    chat(message, ...)       — send one message, get one response back.
+    build_agent(tools=None)     — construct a fresh agent graph.
+    chat(message, session_id)   — send one message, get one response back.
 """
 
 from __future__ import annotations
@@ -31,6 +40,13 @@ from langchain_groq import ChatGroq
 
 from chat.prompts import SYSTEM_PROMPT
 from chat.tools import ALL_TOOLS
+from chat.memory import (
+    get_history,
+    get_session_context,
+    record_incident,
+    record_mood_signal,
+    touch_session,
+)
 from config import get_env
 
 
@@ -47,15 +63,6 @@ DEFAULT_TEMPERATURE = 0
 # ---------------------------------------------------------------------------
 # Orphan follow-up detection
 # ---------------------------------------------------------------------------
-# The pattern catches short messages that clearly reference prior context
-# while the session has no history. We deliberately err on the side of
-# NOT triggering — false negatives are better than false positives.
-#
-# Triggers when ALL of these hold:
-#   1. No conversation history in the session.
-#   2. The message has ≤ 20 words (short).
-#   3. The message contains at least one referential word or phrase.
-
 _REFERENTIAL_PATTERNS = [
     r"\bthose\b",
     r"\bthem\b",
@@ -80,23 +87,17 @@ _REFERENTIAL_PATTERNS = [
 ]
 
 
-def _looks_like_orphan_followup(message: str, history: list[dict[str, Any]] | None) -> bool:
-    """
-    Return True if the message looks like an orphan follow-up.
-
-    An orphan follow-up is a short question that references prior context
-    ("those", "them", "that") while the session has no history. In that
-    case, the correct response is to ask for clarification, not to invent
-    an answer.
-    """
+def _looks_like_orphan_followup(
+    message: str,
+    history: list[dict[str, Any]] | None,
+) -> bool:
+    """Return True if the message is a short follow-up with no prior context."""
     if history:
-        return False  # session has context, don't block
+        return False
 
     text = (message or "").strip()
     if not text:
         return False
-
-    # Short messages only
     if len(text.split()) > 20:
         return False
 
@@ -112,6 +113,129 @@ _ORPHAN_REFUSAL = (
     "are you asking about? Share the file path, PR number, or service name, "
     "and I'll analyze it for you."
 )
+
+
+# ---------------------------------------------------------------------------
+# Mood signal detection
+# ---------------------------------------------------------------------------
+def _detect_mood_signals(message: str) -> list[str]:
+    """
+    Scan the user message for signals that suggest mood.
+
+    Signals are coarse — we don't try to be clever, just notice obvious
+    things. The memory module weights them and produces a mood snapshot.
+
+    Returns a list of signal names. Empty if nothing notable.
+    """
+    if not message:
+        return []
+
+    signals: list[str] = []
+    stripped = message.strip()
+
+    # All-caps words (at least 4 chars, not just "OK")
+    if re.search(r"\b[A-Z]{4,}\b", stripped):
+        signals.append("all_caps")
+
+    # Multiple exclamations
+    if stripped.count("!") >= 2:
+        signals.append("exclamations")
+
+    # Very short messages (fatigue, exhaustion)
+    if len(stripped.split()) <= 3:
+        signals.append("short_message")
+
+    # Apologies (frustration)
+    lower = stripped.lower()
+    if any(p in lower for p in ("sorry", "my bad", "my fault")):
+        signals.append("apology")
+
+    # Venting language
+    vent_markers = (
+        "i've been", "i have been", "ugh", "tired", "exhausted",
+        "frustrated", "so done", "done with", "4 hours", "all day",
+        "can't", "cant", "why does", "why is this",
+    )
+    if any(m in lower for m in vent_markers):
+        signals.append("vent")
+
+    return signals
+
+
+# ---------------------------------------------------------------------------
+# Service name extraction (for incident tracking)
+# ---------------------------------------------------------------------------
+# Matches common patterns like `payment_service`, `customer_database.tf`,
+# `services/payment/app.py`. Extracts the resource-ish token.
+_SERVICE_PATTERNS = [
+    re.compile(r"\b([a-z][a-z0-9_]{2,}_service)\b"),
+    re.compile(r"\b([a-z][a-z0-9_]{2,}_database)\b"),
+    re.compile(r"\b([a-z][a-z0-9_]{2,}_cache)\b"),
+    re.compile(r"\b([a-z][a-z0-9_]{2,}_api)\b"),
+    re.compile(r"\b([a-z][a-z0-9_]{2,}_journey)\b"),
+    re.compile(r"\b([a-z][a-z0-9_]{2,}_app)\b"),
+]
+
+
+def _extract_service_names(message: str) -> list[str]:
+    """Return any service-like tokens found in the message. Deduped."""
+    if not message:
+        return []
+    found: set[str] = set()
+    for pattern in _SERVICE_PATTERNS:
+        for match in pattern.findall(message):
+            found.add(match)
+    return sorted(found)
+
+
+# ---------------------------------------------------------------------------
+# Session context formatting
+# ---------------------------------------------------------------------------
+def _format_context_block(ctx: dict[str, Any]) -> str:
+    """
+    Build a compact context block to inject into the system prompt.
+
+    Only includes fields that are present and meaningful. Never fabricates.
+    Returns an empty string if there's nothing worth adding.
+    """
+    if not ctx:
+        return ""
+
+    lines: list[str] = []
+
+    session_count = int(ctx.get("session_count", 0))
+    turn_count = int(ctx.get("turn_count", 0))
+    mood = ctx.get("mood", "unknown")
+
+    if session_count > 1:
+        lines.append(f"- This is session #{session_count} with this user.")
+    if turn_count > 1:
+        lines.append(f"- This is turn {turn_count} of the current session.")
+
+    if mood and mood != "unknown":
+        lines.append(f"- Current mood read: {mood}.")
+
+    recent = ctx.get("recent_incidents") or []
+    if recent:
+        # Show last 3 unique services
+        seen: list[str] = []
+        for inc in reversed(recent):
+            svc = inc.get("service")
+            if svc and svc not in seen:
+                seen.append(svc)
+            if len(seen) >= 3:
+                break
+        if seen:
+            lines.append(f"- Recently asked about: {', '.join(seen)}.")
+
+    recurring = ctx.get("cross_session_topics") or []
+    if recurring:
+        lines.append(f"- Recurring topics: {', '.join(recurring[:3])}.")
+
+    if not lines:
+        return ""
+
+    return "## Session context\n\n" + "\n".join(lines)
 
 
 # ---------------------------------------------------------------------------
@@ -156,12 +280,23 @@ def _to_message(turn: dict[str, Any]):
     return HumanMessage(content=content)
 
 
-def _build_messages(message: str, history: list[dict[str, Any]] | None):
+def _build_messages(
+    message: str,
+    history: list[dict[str, Any]] | None,
+    context_block: str,
+):
     """Build the message list for one agent invocation."""
     messages = []
+
+    if context_block:
+        # Inject the session context as a system message right after the
+        # main prompt. LangGraph keeps system messages in the message list.
+        messages.append(SystemMessage(content=context_block))
+
     for turn in history or []:
         if isinstance(turn, dict) and turn.get("content"):
             messages.append(_to_message(turn))
+
     messages.append(HumanMessage(content=message))
     return messages
 
@@ -171,17 +306,72 @@ def _build_messages(message: str, history: list[dict[str, Any]] | None):
 # ---------------------------------------------------------------------------
 async def chat(
     message: str,
+    session_id: str,
+    user_id: str = "anonymous",
     history: list[dict[str, Any]] | None = None,
     tools: list[BaseTool] | None = None,
 ) -> dict[str, Any]:
     """
     Send one message to Lya and return her response.
 
-    Includes a runtime guard: if the message looks like an orphan
-    follow-up (references prior context, but history is empty), the
-    guard returns a clarification request without invoking the LLM.
+    Steps:
+        1. Touch the session — updates timing, counts, and mood.
+        2. Scan the message for mood signals and record them.
+        3. Extract service names and record them as incidents.
+        4. Read back the full session context.
+        5. Orphan follow-up guard.
+        6. Build messages (including context block) and invoke the agent.
+
+    Args:
+        message: The user's message text.
+        session_id: Unique session identifier (per tab/window).
+        user_id: Stable user identifier for cross-session memory.
+                 Defaults to "anonymous" for backwards compatibility.
+        history: Optional explicit history. If None, loads from memory.
+        tools: Optional tools. If None, uses ALL_TOOLS.
+
+    Returns:
+        A dict with:
+            - "response": Lya's text reply
+            - "tool_calls": list of tool names invoked
     """
-    # Runtime guard — catch orphan follow-ups before they reach the LLM
+    # 1. Touch the session (bumps turn_count, may bump session_count)
+    try:
+        touch_session(user_id, session_id)
+    except Exception as exc:  # noqa: BLE001
+        logger.warning("touch_session failed: %s", exc)
+
+    # 2. Detect and record mood signals
+    try:
+        for signal in _detect_mood_signals(message):
+            record_mood_signal(user_id, signal)
+    except Exception as exc:  # noqa: BLE001
+        logger.warning("record_mood_signal failed: %s", exc)
+
+    # 3. Record service mentions as incidents
+    try:
+        for service in _extract_service_names(message):
+            record_incident(user_id, service)
+    except Exception as exc:  # noqa: BLE001
+        logger.warning("record_incident failed: %s", exc)
+
+    # 4. Read back the session context
+    try:
+        session_ctx = get_session_context(user_id)
+    except Exception as exc:  # noqa: BLE001
+        logger.warning("get_session_context failed: %s", exc)
+        session_ctx = {}
+    context_block = _format_context_block(session_ctx)
+
+    # 5. If history not supplied, load from memory
+    if history is None:
+        try:
+            history = get_history(session_id)
+        except Exception as exc:  # noqa: BLE001
+            logger.warning("get_history failed: %s", exc)
+            history = []
+
+    # 6. Orphan follow-up guard — runs after history is known
     if _looks_like_orphan_followup(message, history):
         logger.info("Orphan follow-up detected — returning clarification")
         return {
@@ -189,8 +379,9 @@ async def chat(
             "tool_calls": [],
         }
 
+    # 7. Build agent and invoke
     agent = build_agent(tools)
-    messages = _build_messages(message, history)
+    messages = _build_messages(message, history, context_block)
 
     try:
         result = await agent.ainvoke({"messages": messages})
