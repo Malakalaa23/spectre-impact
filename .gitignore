@@ -1,32 +1,45 @@
+# Environment
 .env
+.env.local
+.env.*.local
+
+# Virtual environments
 venv/
+.venv/
+env/
+
+# Python cache
 __pycache__/
 *.pyc
-history.db
+*.pyo
+*.pytest_cache/
+.mypy_cache/
+
+# Local data
+*.db-journal
+
+# Logs
 *.log
 
-# Archive folder - not tracked in git
-_archive_*/
-
-# Audit tools and reports (local-only)
-audit_*.py
-audit_*_report.txt
-audit_report.txt
-
-# Local dev files
-dump_*.py
-dump_*.txt
-*.bak
+# Test audio
+tts_*.mp3
 test_*.mp3
+
+# Local scripts
 audit_*.py
 audit_*.txt
-
 diagnose_*.py
-tts_*.mp3
-
-# Throwaway analysis scripts
+dump_*.py
+dump_*.txt
 analyze_*.py
 
-# ChromaDB persistence - never commit
-rag_db/
-**/chroma.sqlite3
+# Backups
+*.bak
+
+# Archive
+_archive_*/
+
+# Note: rag_db/ and history.db are intentionally NOT ignored.
+# The pre-populated ChromaDB and analysis database ship with the repository
+# so that fresh clones and cold deploys work instantly — no 60-second
+# warm-up on the first RAG query, and no empty dashboard on first load.
