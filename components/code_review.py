@@ -54,6 +54,7 @@ def render_finding(finding, index):
 
 
 def render_diffs(diffs):
+    """Render the changed lines from a code diff."""
     if not diffs:
         st.markdown(
             "<div class='card'><b>Diff waiting for backend data</b><br>"
@@ -88,3 +89,4 @@ def render_diffs(diffs):
                 patch or "No patch returned.",
                 language="diff" if is_diff else _language_for_file(filename),
             )
+
