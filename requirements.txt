@@ -1,0 +1,10 @@
+streamlit>=1.41
+pandas>=2.0
+plotly>=5.18
+requests>=2.31
+streamlit-autorefresh>=1.0.1
+fastapi>=0.110
+uvicorn[standard]>=0.29
+
+qrcode[pil]>=7.4
+python-multipart>=0.0.9

@@ -1,0 +1,792 @@
+/* =========================================================
+   SPECTRE IMPACT — DESIGN SYSTEM
+   Single source of truth for every style in the dashboard.
+   Palette: deep navy surfaces, one red accent, white text.
+   ========================================================= */
+
+:root {
+    /* Surfaces — navy, darkest to lightest */
+    --spectre-bg:         #020617;
+    --spectre-bg-alt:     #050c1c;
+    --spectre-panel:      #0b1220;
+    --spectre-panel-2:    #111c31;
+    --spectre-raised:     #16233c;
+
+    /* Text */
+    --spectre-text:       #e8eef7;
+    --spectre-text-muted: #9fb0c8;
+    --spectre-text-dim:   #6b7c97;
+
+    /* Lines */
+    --spectre-border:        rgba(148, 163, 184, 0.14);
+    --spectre-border-strong: rgba(148, 163, 184, 0.30);
+
+    /* Accent + semantic */
+    --spectre-accent:       #ef4444;
+    --spectre-accent-dark:  #b91c1c;
+    --spectre-accent-light: #f87171;
+    --spectre-accent-soft:  rgba(239, 68, 68, 0.12);
+    --spectre-blue:         #60a5fa;
+    --spectre-green:        #34d399;
+    --spectre-amber:        #fbbf24;
+
+    /* Shape */
+    --spectre-radius:    14px;
+    --spectre-radius-sm: 10px;
+    --spectre-shadow:    0 14px 34px rgba(0, 0, 0, 0.38);
+    --spectre-shadow-sm: 0 6px 18px rgba(0, 0, 0, 0.28);
+}
+
+/* =========================================================
+   1. APP SHELL — every container is navy, no white gaps
+   ========================================================= */
+
+html, body, .stApp, [data-testid="stAppViewContainer"] {
+    background-color: var(--spectre-bg) !important;
+    color: var(--spectre-text);
+}
+
+.stApp {
+    background-image:
+        radial-gradient(circle at 12% -5%, rgba(239, 68, 68, 0.10), transparent 32%),
+        radial-gradient(circle at 92% 0%, rgba(37, 99, 235, 0.12), transparent 34%);
+    background-attachment: fixed;
+}
+
+[data-testid="stHeader"],
+[data-testid="stToolbar"],
+[data-testid="stStatusWidget"] {
+    background: transparent !important;
+    color: var(--spectre-text) !important;
+}
+
+[data-testid="stDecoration"] {
+    background-image: linear-gradient(90deg, var(--spectre-accent-dark), var(--spectre-accent), transparent) !important;
+}
+
+[data-testid="stMain"],
+[data-testid="stMainBlockContainer"],
+[data-testid="block-container"],
+.main .block-container {
+    background: transparent !important;
+}
+
+/* The bottom strip that holds st.chat_input — the usual white band */
+[data-testid="stBottom"],
+[data-testid="stBottom"] > div,
+[data-testid="stBottomBlockContainer"],
+.stChatFloatingInputContainer,
+.stChatFloatingInputContainer > div {
+    background: transparent !important;
+    background-color: transparent !important;
+}
+
+/* Streamlit's own page nav — replaced by the custom sidebar */
+div[data-testid="stSidebarNav"] { display: none !important; }
+
+/* =========================================================
+   2. TYPOGRAPHY
+   ========================================================= */
+
+.stApp, .stMarkdown, p, li, span, label {
+    font-family: "Inter", "Segoe UI", system-ui, -apple-system, sans-serif;
+}
+
+h1, h2, h3, h4, h5 {
+    color: var(--spectre-text) !important;
+    letter-spacing: -0.2px;
+}
+
+h1 { font-weight: 800; }
+h2 { font-weight: 750; }
+h3 { font-weight: 700; }
+
+.stMarkdown p, .stMarkdown li {
+    color: #d5deec;
+    line-height: 1.65;
+}
+
+[data-testid="stCaptionContainer"],
+.stCaption, small {
+    color: var(--spectre-text-dim) !important;
+}
+
+a, a:visited { color: var(--spectre-accent-light); }
+a:hover { color: #fca5a5; }
+
+hr { border-color: var(--spectre-border) !important; }
+
+::selection {
+    background: rgba(239, 68, 68, 0.32);
+    color: #ffffff;
+}
+
+/* =========================================================
+   3. SIDEBAR
+   ========================================================= */
+
+section[data-testid="stSidebar"] {
+    background: linear-gradient(180deg, #050c1c 0%, #081428 55%, #030a18 100%) !important;
+    border-right: 1px solid var(--spectre-border);
+}
+
+section[data-testid="stSidebar"] > div { padding: 1rem 0.85rem; }
+
+section[data-testid="stSidebar"] * { color: var(--spectre-text); }
+
+.sidebar-logo {
+    padding: 18px;
+    margin-bottom: 18px;
+    border-radius: 16px;
+    background: linear-gradient(140deg, #13203a, #0a1526);
+    border: 1px solid var(--spectre-border-strong);
+    box-shadow: var(--spectre-shadow-sm);
+}
+
+.sidebar-logo-title {
+    font-size: 17px;
+    font-weight: 800;
+    color: #ffffff;
+    letter-spacing: 0.7px;
+}
+
+.sidebar-logo-title span { color: var(--spectre-accent); }
+
+.sidebar-logo-subtitle {
+    font-size: 10px;
+    color: var(--spectre-text-dim);
+    margin-top: 6px;
+}
+
+.sidebar-section {
+    color: var(--spectre-text-dim);
+    font-size: 10px;
+    font-weight: 800;
+    text-transform: uppercase;
+    letter-spacing: 1.4px;
+    margin: 20px 8px 8px;
+}
+
+section[data-testid="stSidebar"] div[role="radiogroup"] {
+    background: var(--spectre-panel);
+    border-radius: var(--spectre-radius-sm);
+    padding: 6px 8px;
+    border: 1px solid var(--spectre-border);
+}
+
+section[data-testid="stSidebar"] .stButton { margin: 3px 0; }
+
+section[data-testid="stSidebar"] .stButton > button {
+    width: 100%;
+    background: transparent !important;
+    background-image: none !important;
+    color: #cbd8ea !important;
+    border: 1px solid transparent !important;
+    border-radius: var(--spectre-radius-sm);
+    text-align: left;
+    padding: 10px 13px;
+    font-size: 13px;
+    font-weight: 500;
+    box-shadow: none !important;
+    transition: background 0.18s ease, border-color 0.18s ease;
+}
+
+section[data-testid="stSidebar"] .stButton > button:hover {
+    background: var(--spectre-panel-2) !important;
+    color: #ffffff !important;
+    border-color: var(--spectre-border-strong) !important;
+    transform: none;
+}
+
+.nav-active {
+    width: 100%;
+    box-sizing: border-box;
+    padding: 10px 13px;
+    margin: 3px 0;
+    border-radius: var(--spectre-radius-sm);
+    font-size: 13px;
+    font-weight: 650;
+    color: #ffffff;
+    background: var(--spectre-panel-2);
+    border: 1px solid var(--spectre-border-strong);
+    border-left: 3px solid var(--spectre-accent);
+}
+
+/* =========================================================
+   4. BUTTONS
+   ========================================================= */
+
+.stButton > button,
+.stDownloadButton > button,
+.stFormSubmitButton > button {
+    background: var(--spectre-panel-2);
+    color: var(--spectre-text);
+    border: 1px solid var(--spectre-border-strong);
+    border-radius: var(--spectre-radius-sm);
+    font-weight: 600;
+    padding: 0.5rem 1rem;
+    transition: background 0.18s ease, border-color 0.18s ease, box-shadow 0.18s ease;
+}
+
+.stButton > button:hover,
+.stDownloadButton > button:hover,
+.stFormSubmitButton > button:hover {
+    background: var(--spectre-raised);
+    border-color: rgba(239, 68, 68, 0.45);
+    color: #ffffff;
+}
+
+.stButton > button:focus-visible,
+.stDownloadButton > button:focus-visible {
+    outline: 2px solid var(--spectre-accent-light);
+    outline-offset: 2px;
+}
+
+/* Primary action — the only place the red fill is used */
+.stButton > button[kind="primary"],
+.stFormSubmitButton > button[kind="primary"],
+.stDownloadButton > button[kind="primary"] {
+    background: linear-gradient(135deg, var(--spectre-accent-dark), var(--spectre-accent));
+    border-color: rgba(248, 113, 113, 0.5);
+    color: #ffffff;
+}
+
+.stButton > button[kind="primary"]:hover {
+    box-shadow: 0 0 22px rgba(239, 68, 68, 0.28);
+}
+
+.stButton > button:disabled,
+.stButton > button:disabled:hover {
+    background: var(--spectre-panel) !important;
+    color: var(--spectre-text-dim) !important;
+    border-color: var(--spectre-border) !important;
+    box-shadow: none !important;
+}
+
+/* =========================================================
+   5. INPUTS, SELECTS, DROPDOWN MENUS
+   (baseweb popovers are the classic white-flash offender)
+   ========================================================= */
+
+.stTextInput input,
+.stNumberInput input,
+.stDateInput input,
+.stTimeInput input,
+.stTextArea textarea,
+div[data-baseweb="input"],
+div[data-baseweb="textarea"],
+div[data-baseweb="select"] > div,
+div[data-baseweb="base-input"] {
+    background: var(--spectre-panel) !important;
+    color: var(--spectre-text) !important;
+    border-color: var(--spectre-border-strong) !important;
+    border-radius: var(--spectre-radius-sm) !important;
+}
+
+.stTextInput input::placeholder,
+.stTextArea textarea::placeholder {
+    color: var(--spectre-text-dim) !important;
+}
+
+div[data-baseweb="select"] svg { fill: var(--spectre-text-muted); }
+
+div[data-baseweb="popover"],
+div[data-baseweb="popover"] > div,
+div[data-baseweb="menu"],
+ul[role="listbox"],
+div[data-baseweb="calendar"] {
+    background: var(--spectre-panel) !important;
+    color: var(--spectre-text) !important;
+    border: 1px solid var(--spectre-border-strong) !important;
+    border-radius: var(--spectre-radius-sm) !important;
+    box-shadow: var(--spectre-shadow) !important;
+}
+
+ul[role="listbox"] li,
+div[data-baseweb="menu"] li {
+    background: transparent !important;
+    color: var(--spectre-text) !important;
+}
+
+ul[role="listbox"] li:hover,
+div[data-baseweb="menu"] li:hover,
+li[aria-selected="true"] {
+    background: var(--spectre-panel-2) !important;
+}
+
+/* Tooltips */
+div[data-baseweb="tooltip"] {
+    background: var(--spectre-raised) !important;
+    color: var(--spectre-text) !important;
+    border-radius: 8px !important;
+}
+
+/* Radio / checkbox / slider */
+.stRadio label, .stCheckbox label, .stSlider label {
+    color: var(--spectre-text) !important;
+}
+
+.stSlider [data-baseweb="slider"] div[role="slider"] {
+    background: var(--spectre-accent) !important;
+}
+
+/* File uploader */
+[data-testid="stFileUploader"] section,
+[data-testid="stFileUploaderDropzone"] {
+    background: var(--spectre-panel) !important;
+    border: 1px dashed var(--spectre-border-strong) !important;
+    border-radius: var(--spectre-radius-sm) !important;
+    color: var(--spectre-text-muted) !important;
+}
+
+[data-testid="stFileUploader"] small { color: var(--spectre-text-dim) !important; }
+
+/* =========================================================
+   6. CONTAINERS, EXPANDERS, TABS, TABLES, CODE
+   ========================================================= */
+
+div[data-testid="stVerticalBlockBorderWrapper"] {
+    background: linear-gradient(150deg, var(--spectre-panel), var(--spectre-bg-alt));
+    border: 1px solid var(--spectre-border) !important;
+    border-radius: var(--spectre-radius) !important;
+    box-shadow: var(--spectre-shadow-sm);
+}
+
+[data-testid="stExpander"],
+[data-testid="stExpander"] > details {
+    background: var(--spectre-panel) !important;
+    border: 1px solid var(--spectre-border) !important;
+    border-radius: var(--spectre-radius) !important;
+    overflow: hidden;
+}
+
+[data-testid="stExpander"] summary,
+[data-testid="stExpander"] summary:hover {
+    background: var(--spectre-panel-2) !important;
+    color: var(--spectre-text) !important;
+}
+
+[data-testid="stExpander"] [data-testid="stExpanderDetails"] {
+    background: var(--spectre-panel) !important;
+}
+
+.stTabs [data-baseweb="tab-list"] {
+    background: transparent;
+    border-bottom: 1px solid var(--spectre-border);
+    gap: 4px;
+}
+
+.stTabs [data-baseweb="tab"] {
+    background: transparent;
+    color: var(--spectre-text-muted);
+    border-radius: 10px 10px 0 0;
+}
+
+.stTabs [aria-selected="true"] {
+    background: var(--spectre-panel-2);
+    color: #ffffff !important;
+}
+
+.stTabs [data-baseweb="tab-highlight"] { background: var(--spectre-accent) !important; }
+
+code, kbd, pre, [data-testid="stCode"] {
+    background: #060e1e !important;
+    color: #dbe6f5 !important;
+    border-radius: var(--spectre-radius-sm);
+}
+
+[data-testid="stCode"] { border: 1px solid var(--spectre-border); }
+
+.stMarkdown code {
+    color: #fca5a5 !important;
+    padding: 1px 6px;
+    border: 1px solid var(--spectre-border);
+}
+
+[data-testid="stTable"], [data-testid="stDataFrame"] {
+    background: var(--spectre-panel) !important;
+    border-radius: var(--spectre-radius);
+    border: 1px solid var(--spectre-border);
+}
+
+[data-testid="stDataFrame"] * { color: var(--spectre-text) !important; }
+
+/* Streamlit metric widget */
+[data-testid="stMetric"] {
+    background: linear-gradient(150deg, var(--spectre-panel), var(--spectre-bg-alt));
+    border: 1px solid var(--spectre-border);
+    border-radius: var(--spectre-radius);
+    padding: 14px 16px;
+}
+
+[data-testid="stMetricValue"] { color: #ffffff !important; font-weight: 800; }
+[data-testid="stMetricLabel"] { color: var(--spectre-text-muted) !important; }
+
+/* Progress + spinner */
+[data-testid="stProgress"] > div > div > div > div {
+    background: linear-gradient(90deg, var(--spectre-accent-dark), var(--spectre-accent));
+}
+
+.stSpinner > div { border-top-color: var(--spectre-accent) !important; }
+
+/* Toast */
+[data-testid="stToast"] {
+    background: var(--spectre-raised) !important;
+    color: var(--spectre-text) !important;
+    border: 1px solid var(--spectre-border-strong) !important;
+}
+
+/* =========================================================
+   7. ALERTS — tinted navy, never a white slab
+   ========================================================= */
+
+[data-testid="stAlert"], .stAlert {
+    background: var(--spectre-panel) !important;
+    border: 1px solid var(--spectre-border) !important;
+    border-left: 3px solid var(--spectre-blue) !important;
+    border-radius: var(--spectre-radius-sm) !important;
+    color: var(--spectre-text) !important;
+    box-shadow: none !important;
+}
+
+[data-testid="stAlert"] p,
+[data-testid="stAlert"] li,
+[data-testid="stAlert"] strong { color: #dce6f4 !important; }
+
+div[data-testid="stAlert"]:has([data-testid="stAlertContentSuccess"]) { border-left-color: var(--spectre-green) !important; }
+div[data-testid="stAlert"]:has([data-testid="stAlertContentWarning"]) { border-left-color: var(--spectre-amber) !important; }
+div[data-testid="stAlert"]:has([data-testid="stAlertContentError"])   { border-left-color: var(--spectre-accent) !important; }
+
+/* =========================================================
+   8. PROJECT COMPONENTS
+   ========================================================= */
+
+.card {
+    background: linear-gradient(150deg, var(--spectre-panel), var(--spectre-bg-alt));
+    border: 1px solid var(--spectre-border);
+    border-radius: var(--spectre-radius);
+    padding: 18px;
+    box-shadow: var(--spectre-shadow-sm);
+}
+
+.card h2, .card h3, .card h4 { margin-top: 0; }
+
+.red-card {
+    background: linear-gradient(150deg, #1d1020, #0b1220);
+    border: 1px solid rgba(239, 68, 68, 0.34);
+    border-left: 3px solid var(--spectre-accent);
+    border-radius: var(--spectre-radius);
+    padding: 18px;
+}
+
+.blue-card {
+    background: linear-gradient(150deg, #0d1a33, #060e1e);
+    border: 1px solid rgba(96, 165, 250, 0.26);
+    border-left: 3px solid var(--spectre-blue);
+    border-radius: var(--spectre-radius);
+    padding: 18px;
+}
+
+.risk-card {
+    padding: 17px;
+    border-radius: 13px;
+    background: linear-gradient(150deg, #1d1020, #0b1220);
+    border: 1px solid rgba(239, 68, 68, 0.3);
+}
+
+.insight-card {
+    padding: 17px;
+    border-radius: 13px;
+    background: linear-gradient(150deg, var(--spectre-panel), var(--spectre-bg-alt));
+    border: 1px solid var(--spectre-border);
+    min-height: 130px;
+}
+
+.metric-card {
+    min-height: 110px;
+    padding: 16px 18px;
+    border-radius: var(--spectre-radius);
+    background: linear-gradient(150deg, var(--spectre-panel), var(--spectre-bg-alt));
+    border: 1px solid var(--spectre-border);
+    box-shadow: var(--spectre-shadow-sm);
+    position: relative;
+}
+
+.metric-card-icon {
+    position: absolute;
+    top: 14px;
+    right: 16px;
+    font-size: 16px;
+    opacity: 0.65;
+}
+
+.metric-value { font-size: 28px; font-weight: 800; color: #ffffff; margin-top: 4px; }
+.metric-label { color: var(--spectre-text-muted); font-size: 12px; margin-top: 4px; }
+.metric-delta { margin-top: 8px; font-size: 11px; font-weight: 700; }
+.metric-delta.up { color: var(--spectre-green); }
+.metric-delta.down { color: var(--spectre-accent-light); }
+
+.alert-bar {
+    display: flex;
+    align-items: center;
+    gap: 10px;
+    padding: 14px 18px;
+    border-radius: 12px;
+    background: linear-gradient(90deg, rgba(185, 28, 28, 0.28), rgba(11, 18, 32, 0.9));
+    border: 1px solid rgba(239, 68, 68, 0.3);
+    color: #fca5a5;
+    font-size: 13px;
+    font-weight: 700;
+}
+
+.empty-state { text-align: center; padding: 30px 18px; color: var(--spectre-text-dim); }
+.empty-state-icon { font-size: 26px; margin-bottom: 8px; opacity: 0.6; }
+.empty-state-title { color: var(--spectre-text); font-size: 14px; font-weight: 700; }
+.empty-state-subtitle { color: var(--spectre-text-dim); font-size: 12px; margin-top: 4px; }
+
+.main-title {
+    font-size: 40px;
+    font-weight: 800;
+    letter-spacing: -1px;
+    color: #ffffff;
+}
+
+.breadcrumb-title { font-size: 26px; font-weight: 800; color: #ffffff; }
+.breadcrumb-title span { color: var(--spectre-text-dim); font-weight: 500; }
+
+/* Severity + status pills */
+.sev-high, .sev-medium, .sev-low, .sev-unknown,
+.high-badge, .impact-badge, .live-badge, .cached-badge, .live, .spectre-status {
+    display: inline-block;
+    padding: 5px 12px;
+    border-radius: 999px;
+    font-size: 11px;
+    font-weight: 700;
+    border: 1px solid var(--spectre-border-strong);
+    background: var(--spectre-panel);
+}
+
+.sev-high, .high-badge { color: var(--spectre-accent-light); background: var(--spectre-accent-soft); border-color: rgba(248, 113, 113, 0.32); }
+.sev-medium, .impact-badge { color: var(--spectre-amber); background: rgba(245, 158, 11, 0.12); border-color: rgba(251, 191, 36, 0.28); }
+.sev-low { color: var(--spectre-green); background: rgba(52, 211, 153, 0.1); border-color: rgba(52, 211, 153, 0.28); }
+.sev-unknown { color: var(--spectre-text-muted); }
+
+.live-badge, .live { color: var(--spectre-green); background: rgba(52, 211, 153, 0.1); border-color: rgba(52, 211, 153, 0.3); margin-top: 12px; text-align: center; }
+.cached-badge { color: var(--spectre-amber); background: rgba(245, 158, 11, 0.1); border-color: rgba(251, 191, 36, 0.3); margin-top: 12px; text-align: center; }
+.live-dot { color: var(--spectre-green); margin-right: 5px; }
+
+.spectre-status.pending   { color: var(--spectre-amber); }
+.spectre-status.executing { color: var(--spectre-blue); }
+.spectre-status.complete  { color: var(--spectre-green); }
+.spectre-status.failed    { color: var(--spectre-accent-light); }
+.spectre-status.idle      { color: var(--spectre-text-muted); }
+
+/* Activity feed */
+.activity-item {
+    display: flex;
+    align-items: flex-start;
+    gap: 10px;
+    padding: 10px 4px;
+    border-bottom: 1px solid var(--spectre-border);
+    font-size: 12px;
+    color: #cbd8ea;
+}
+.activity-item:last-child { border-bottom: none; }
+.activity-dot { color: var(--spectre-green); font-size: 10px; margin-top: 2px; }
+.activity-meta { color: var(--spectre-text-dim); font-size: 11px; margin-top: 2px; }
+
+/* Source box */
+.source-box {
+    margin-top: 15px;
+    padding: 16px;
+    border-radius: var(--spectre-radius);
+    background: linear-gradient(150deg, var(--spectre-panel), var(--spectre-bg-alt));
+    border: 1px solid var(--spectre-border);
+    box-shadow: var(--spectre-shadow-sm);
+}
+.source-title { font-size: 12px; font-weight: 700; color: var(--spectre-text); margin-bottom: 12px; }
+.source-item { padding: 8px 0; font-size: 12px; color: #cbd8ea; }
+.source-description { display: block; margin-left: 18px; margin-top: 3px; color: var(--spectre-text-dim); font-size: 10px; }
+.bfs-dot { color: var(--spectre-green); margin-right: 5px; }
+.ai-dot { color: #a78bfa; margin-right: 5px; }
+
+/* Flow boxes */
+.flow-wrap { display: flex; align-items: center; justify-content: center; gap: 8px; flex-wrap: wrap; margin-top: 10px; }
+.flow-box {
+    padding: 11px 13px;
+    border-radius: 9px;
+    background: var(--spectre-panel-2);
+    border: 1px solid var(--spectre-border-strong);
+    color: #cbd8ea;
+    font-size: 11px;
+    text-align: center;
+    max-width: 130px;
+}
+.flow-arrow { color: var(--spectre-accent); font-size: 16px; font-weight: 800; }
+
+/* Business view */
+.business-value { font-size: 34px; font-weight: 800; color: #ffffff; margin-top: 6px; }
+.business-label { color: var(--spectre-text-muted); font-size: 13px; }
+
+.footer { text-align: center; color: var(--spectre-text-dim); font-size: 11px; padding: 25px; }
+
+/* =========================================================
+   9. CHAT
+   ========================================================= */
+
+.spectre-chat-bubble {
+    max-width: 86%;
+    padding: 13px 16px;
+    border-radius: 16px;
+    margin: 7px 0;
+    line-height: 1.55;
+    color: var(--spectre-text);
+    border: 1px solid var(--spectre-border);
+    overflow-wrap: anywhere;
+}
+
+.spectre-chat-bubble b { color: #ffffff; }
+
+.spectre-chat-user {
+    margin-left: auto;
+    background: linear-gradient(140deg, #16233c, #0d1729);
+    border-bottom-right-radius: 5px;
+}
+
+.spectre-chat-assistant {
+    margin-right: auto;
+    background: linear-gradient(140deg, var(--spectre-panel), var(--spectre-bg-alt));
+    border-left: 3px solid var(--spectre-accent);
+    border-bottom-left-radius: 5px;
+}
+
+.spectre-tool-call {
+    padding: 8px 12px;
+    border-radius: var(--spectre-radius-sm);
+    background: var(--spectre-panel-2);
+    border: 1px solid rgba(167, 139, 250, 0.28);
+    color: #c4b5fd;
+    font-size: 12px;
+    margin: 4px 0;
+}
+
+.spectre-typing {
+    display: inline-flex;
+    gap: 4px;
+    align-items: center;
+    padding: 9px 12px;
+    border-radius: var(--spectre-radius);
+    background: var(--spectre-panel);
+    border: 1px solid var(--spectre-border);
+}
+.spectre-typing span {
+    width: 6px;
+    height: 6px;
+    border-radius: 50%;
+    background: var(--spectre-text-muted);
+    animation: spectrePulse 1.2s infinite;
+}
+.spectre-typing span:nth-child(2) { animation-delay: 0.15s; }
+.spectre-typing span:nth-child(3) { animation-delay: 0.3s; }
+
+@keyframes spectrePulse {
+    0%, 60%, 100% { opacity: 0.3; transform: translateY(0); }
+    30% { opacity: 1; transform: translateY(-2px); }
+}
+
+/* Chat input */
+div[data-testid="stChatInput"] {
+    background: var(--spectre-panel) !important;
+    border: 1px solid var(--spectre-border-strong) !important;
+    border-radius: var(--spectre-radius) !important;
+    box-shadow: var(--spectre-shadow) !important;
+}
+
+div[data-testid="stChatInput"] form,
+div[data-testid="stChatInput"] > div {
+    background: transparent !important;
+    border: none !important;
+}
+
+div[data-testid="stChatInput"] textarea {
+    color: #ffffff !important;
+    background: transparent !important;
+    -webkit-text-fill-color: #ffffff !important;
+    caret-color: #ffffff !important;
+}
+
+div[data-testid="stChatInput"] textarea::placeholder {
+    color: var(--spectre-text-dim) !important;
+    opacity: 1 !important;
+}
+
+div[data-testid="stChatInput"] button {
+    background: transparent !important;
+    border: none !important;
+    color: #ffffff !important;
+}
+
+[data-testid="stChatMessage"] {
+    background: var(--spectre-panel) !important;
+    border: 1px solid var(--spectre-border);
+    border-radius: var(--spectre-radius);
+}
+
+/* Audio player */
+[data-testid="stAudio"] audio {
+    width: 100%;
+    filter: invert(0.92) hue-rotate(180deg);
+    border-radius: var(--spectre-radius-sm);
+}
+
+/* =========================================================
+   10. CODE REVIEW FINDINGS
+   ========================================================= */
+
+.spectre-finding {
+    padding: 14px;
+    border-radius: 12px;
+    background: var(--spectre-panel);
+    border: 1px solid var(--spectre-border);
+    margin: 8px 0;
+}
+.spectre-finding-title { font-weight: 700; color: #ffffff; }
+.spectre-finding-meta { font-size: 11px; color: var(--spectre-text-muted); margin-top: 5px; }
+.spectre-finding-critical { border-left: 3px solid var(--spectre-accent); }
+.spectre-finding-high     { border-left: 3px solid #fb923c; }
+.spectre-finding-medium   { border-left: 3px solid var(--spectre-amber); }
+.spectre-finding-low      { border-left: 3px solid var(--spectre-green); }
+.spectre-finding-info     { border-left: 3px solid var(--spectre-blue); }
+
+.spectre-qr { display: flex; justify-content: center; margin: 20px 0; }
+
+/* =========================================================
+   11. RESPONSIVE + MOTION
+   ========================================================= */
+
+@media (max-width: 768px) {
+    .metric-card { min-height: 90px; padding: 12px 14px; }
+    .metric-value { font-size: 22px; }
+    .metric-label { font-size: 11px; }
+    .main-title { font-size: 28px; }
+    .breadcrumb-title { font-size: 18px; }
+    .spectre-chat-bubble { max-width: 94%; font-size: 14px; padding: 10px 12px; }
+    .card, .red-card, .blue-card, .risk-card, .insight-card { padding: 12px; }
+    .sidebar-logo { padding: 12px; }
+    .sidebar-logo-title { font-size: 15px; }
+    .stButton > button { min-height: 42px; font-size: 14px; }
+    .live-badge, .cached-badge { padding: 6px 14px; font-size: 10px; }
+    [data-testid="stMainBlockContainer"] { padding-left: 1rem; padding-right: 1rem; }
+}
+
+@media (max-width: 480px) {
+    .main-title { font-size: 22px; }
+    .metric-value { font-size: 18px; }
+    .spectre-chat-bubble { max-width: 98%; }
+    .flow-box { max-width: 100%; }
+}
+
+@media (prefers-reduced-motion: reduce) {
+    .spectre-typing span { animation: none !important; opacity: 0.7; }
+    .stButton > button { transition: none !important; transform: none !important; }
+}

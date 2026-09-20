@@ -1,0 +1,115 @@
+[
+  {
+    "event_id": "demo-445",
+    "event_type": "pull_request",
+    "action": "synchronize",
+    "author": "Yassin",
+    "repository": "Spectre",
+    "pr_number": "#445",
+    "commit_message": "Update login connection handling",
+    "changed_files": [
+      "login.py",
+      "database.tf",
+      "docker-compose.yml"
+    ],
+    "severity": "HIGH",
+    "problem": "Login and checkout may lose database connectivity after deployment.",
+    "ai_analysis": "The dependency chain suggests authentication and checkout risk. Validate database connectivity before release.",
+    "affected_services": [
+      "Login Service",
+      "Payment Gateway",
+      "Main Database"
+    ],
+    "status": "needs_attention",
+    "timestamp": "2026-08-15T20:00:00+00:00",
+    "source": "demo"
+  },
+  {
+    "event_id": "demo-443",
+    "event_type": "pull_request",
+    "action": "opened",
+    "author": "Malak",
+    "repository": "Spectre",
+    "pr_number": "#443",
+    "commit_message": "Refactor authentication middleware",
+    "changed_files": [
+      "auth_middleware.py",
+      "session_manager.py"
+    ],
+    "severity": "HIGH",
+    "problem": "Authentication sessions may fail validation.",
+    "ai_analysis": "The change touches the authentication path and may increase 401 responses.",
+    "affected_services": [
+      "Authentication",
+      "API Gateway"
+    ],
+    "status": "needs_attention",
+    "timestamp": "2026-08-15T19:55:00+00:00",
+    "source": "demo"
+  },
+  {
+    "event_id": "test-pr-2",
+    "event_type": "pull_request",
+    "action": "synchronize",
+    "author": "Yassin",
+    "repository": "Acme/Spectre",
+    "pr_number": "#101",
+    "commit_message": "Update login flow",
+    "changed_files": [
+      "login.py",
+      "database.tf"
+    ],
+    "severity": "MEDIUM",
+    "problem": "This unknown-risk change may affect Login Service, Authentication, Main Database. Validate the affected services before deployment.",
+    "ai_analysis": "The dependency analysis found a potential blast radius across Login Service, Authentication, Main Database. The AI fallback recommends health checks and rollback readiness before release.",
+    "affected_services": [
+      "Login Service",
+      "Authentication",
+      "Main Database",
+      "Payment Gateway"
+    ],
+    "status": "review",
+    "timestamp": "2026-08-15T21:25:50.929556+00:00",
+    "source": "github_webhook"
+  },
+  {
+    "event_id": "github-1786829150.93215",
+    "event_type": "push",
+    "action": "push",
+    "author": "Yassin",
+    "repository": "Acme/Spectre",
+    "pr_number": "commit:abcdef12",
+    "commit_message": "Fix payment retry",
+    "changed_files": [
+      "retry_policy.py",
+      "payment_client.py"
+    ],
+    "severity": "MEDIUM",
+    "problem": "This unknown-risk change may affect Payment Gateway, Main Database. Validate the affected services before deployment.",
+    "ai_analysis": "The dependency analysis found a potential blast radius across Payment Gateway, Main Database. The AI fallback recommends health checks and rollback readiness before release.",
+    "affected_services": [
+      "Payment Gateway",
+      "Main Database"
+    ],
+    "status": "review",
+    "timestamp": "2026-08-15T21:25:50.932157+00:00",
+    "source": "github_webhook"
+  },
+  {
+    "event_id": "github-1786836695.587011",
+    "event_type": "pull_request",
+    "action": "opened",
+    "author": "Yassin",
+    "repository": "demo/spectre-impact",
+    "pr_number": "#101",
+    "commit_message": "Update payment service",
+    "changed_files": [],
+    "severity": "LOW",
+    "problem": "No known service dependency was detected from the changed files.",
+    "ai_analysis": "The change needs manual review because the local dependency map has no matching service.",
+    "affected_services": [],
+    "status": "review",
+    "timestamp": "2026-08-15T23:31:35.587044+00:00",
+    "source": "github_webhook"
+  }
+]
