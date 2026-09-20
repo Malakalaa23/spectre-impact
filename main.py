@@ -6,6 +6,7 @@ Endpoints:
     GET  /health/memory           — memory backend status.
     GET  /api/live-feed           — recent auto-fired demo events.
     GET  /api/landing/presets     — bilingual landing page content.
+    GET  /chat                    — chat deep-link (opens the chat UI).
     POST /webhook                 — GitHub webhook receiver (PR + push).
     GET  /api/analyses            — list recent analyses.
     GET  /api/analyses/{pr}       — full analysis for a PR.
@@ -13,12 +14,21 @@ Endpoints:
     POST /api/chat                — Lya chat endpoint.
     POST /api/chat/clear          — clear a session's history.
     POST /api/tts                 — text-to-speech (MP3 output).
+
+Design notes:
+    - BFS delegates to backend.analysis.change_analysis_engine.analyze_impact().
+    - Chat endpoints use chat.agent + chat.memory + chat.safety.
+    - TTS uses ai.tts (Edge TTS, English + Egyptian Arabic).
+    - A background task auto-fires synthetic PR events every 30 seconds.
+    - user_id is preferred over session_id for cross-session memory; the
+      server sets a signed cookie on first contact and reuses it after.
 """
 
 import sys
 import os
 import json
 import yaml
+import uuid
 import hashlib
 import asyncio
 import traceback
@@ -28,6 +38,7 @@ from collections import deque
 
 from fastapi import BackgroundTasks, FastAPI, Request, HTTPException
 from fastapi.responses import Response
+from starlette.middleware.sessions import SessionMiddleware
 from pydantic import BaseModel, Field
 from dotenv import load_dotenv
 from github import Github, GithubException, Auth
@@ -61,6 +72,15 @@ def log(msg: str) -> None:
 # FastAPI app
 # -------------------------------------------------------------------
 app = FastAPI(title="Spectre Impact")
+
+# Signed cookie session (for stable user_id across requests).
+SESSION_SECRET = os.getenv("SESSION_SECRET", "spectre-impact-dev-secret-change-me")
+app.add_middleware(
+    SessionMiddleware,
+    secret_key=SESSION_SECRET,
+    max_age=60 * 60 * 24 * 30,  # 30 days
+)
+
 GITHUB_TOKEN = os.getenv("GITHUB_TOKEN")
 
 
@@ -149,7 +169,7 @@ except ImportError as e:
     def get_cache_key_for_diff(diff): return hashlib.md5(diff.encode()).hexdigest()
 
 
-# Lya chat agent
+# Lya chat agent — new signature accepts user_id
 try:
     from chat.agent import chat as lya_chat
     from chat.memory import (
@@ -162,7 +182,7 @@ try:
 except ImportError as e:
     log(f"Lya chat import failed: {e}")
 
-    async def lya_chat(message, history=None, tools=None):
+    async def lya_chat(message, session_id, user_id="anonymous", history=None, tools=None):
         return {"response": "Chat agent unavailable.", "tool_calls": []}
 
     def get_history(sid, limit=None): return []
@@ -372,11 +392,13 @@ async def _stop_live_demo_stream() -> None:
 class ChatRequest(BaseModel):
     message: str = Field(..., min_length=1, max_length=4000)
     session_id: str = Field(..., min_length=1, max_length=128)
+    user_id: str | None = Field(None, max_length=128)
 
 
 class ChatResponse(BaseModel):
     response: str
     session_id: str
+    user_id: str
     tool_calls: list[str] = []
 
 
@@ -404,22 +426,65 @@ def health_memory():
 # -------------------------------------------------------------------
 @app.get("/api/landing/presets")
 def landing_presets() -> dict[str, Any]:
-    """
-    Return bilingual landing page content for the frontend.
-
-    Frontend usage:
-        presets = requests.get(f"{BASE}/api/landing/presets").json()
-        chosen = presets[user_language]  # "en" or "ar"
-        # Render chosen["headline"], chosen["example_prompts"], etc.
-
-    The frontend should display two buttons:
-        [🇬🇧 English]   [🇪🇬 مصري]
-    Each maps to a key ("en" or "ar") in this response.
-    """
+    """Return bilingual landing page content for the frontend."""
     return {
         "available_languages": list(LANDING_PRESETS.keys()),
         "default": "en",
         "presets": LANDING_PRESETS,
+    }
+
+
+# -------------------------------------------------------------------
+# Chat deep-link
+# -------------------------------------------------------------------
+@app.get("/chat")
+def chat_deep_link(
+    request: Request,
+    q: str = "",
+    pr: int | None = None,
+    lang: str = "en",
+) -> dict[str, Any]:
+    """
+    Deep-link endpoint for chat.
+
+    When someone clicks "Ask Lya about this change" from a PR comment, they
+    land here. The frontend pre-fills the chat input with `q` and uses the
+    returned session_id + user_id to continue the conversation.
+
+    Query params:
+        q     — the pre-filled question (URL-encoded)
+        pr    — optional PR number for context
+        lang  — "en" or "ar" (default "en")
+
+    Returns:
+        session_id         — stable session for this browser tab
+        user_id            — stable user ID across sessions
+        prefilled_question — the q param, echoed back
+        pr_number          — the pr param, echoed back
+        language           — the lang param
+        presets            — landing preset for that language
+    """
+    session_id = request.session.get("spectre_session_id")
+    if not session_id:
+        session_id = str(uuid.uuid4())
+        request.session["spectre_session_id"] = session_id
+
+    user_id = request.session.get("spectre_user_id")
+    if not user_id:
+        user_id = str(uuid.uuid4())
+        request.session["spectre_user_id"] = user_id
+
+    # If lang is unknown, fall back to English
+    if lang not in LANDING_PRESETS:
+        lang = "en"
+
+    return {
+        "session_id": session_id,
+        "user_id": user_id,
+        "prefilled_question": q,
+        "pr_number": pr,
+        "language": lang,
+        "presets": LANDING_PRESETS[lang],
     }
 
 
@@ -442,23 +507,51 @@ def live_feed(limit: int = 20) -> dict[str, Any]:
 # Lya chat
 # -------------------------------------------------------------------
 @app.post("/api/chat", response_model=ChatResponse)
-async def chat_endpoint(req: ChatRequest) -> ChatResponse:
-    log(f"/api/chat session={req.session_id} len={len(req.message)}")
+async def chat_endpoint(req: ChatRequest, request: Request) -> ChatResponse:
+    """
+    Send a message to Lya and get a response.
 
+    user_id resolution order:
+        1. From the request body (explicit).
+        2. From the signed cookie session.
+        3. Generate a new one and store it in the session.
+
+    The resolved user_id is returned in the response so the frontend can
+    persist it if it wants to control identity across devices.
+    """
+    log(f"/api/chat session={req.session_id} user={req.user_id or '(cookie)'} len={len(req.message)}")
+
+    # Resolve user_id
+    user_id = req.user_id
+    if not user_id:
+        user_id = request.session.get("spectre_user_id")
+    if not user_id:
+        user_id = str(uuid.uuid4())
+    request.session["spectre_user_id"] = user_id
+
+    # Sanitize input
     try:
         clean_message = sanitize_input(req.message)
     except ValueError as exc:
         log(f"Blocked input in {req.session_id}: {exc}")
         raise HTTPException(status_code=400, detail="Invalid input.") from exc
 
+    # Load history for the session
     history = get_history(req.session_id)
 
+    # Call the agent (new signature: message, session_id, user_id, history)
     try:
-        result = await lya_chat(clean_message, history=history)
+        result = await lya_chat(
+            clean_message,
+            req.session_id,
+            user_id=user_id,
+            history=history,
+        )
     except Exception as exc:
         log(f"Chat failed: {exc}\n{traceback.format_exc()}")
         raise HTTPException(status_code=500, detail="Chat failed.") from exc
 
+    # Persist
     save_message(req.session_id, "user", clean_message)
     save_message(req.session_id, "assistant", result.get("response", ""))
 
@@ -467,12 +560,14 @@ async def chat_endpoint(req: ChatRequest) -> ChatResponse:
     return ChatResponse(
         response=safe_response,
         session_id=req.session_id,
+        user_id=user_id,
         tool_calls=result.get("tool_calls", []),
     )
 
 
 @app.post("/api/chat/clear")
 async def chat_clear(session_id: str) -> dict[str, Any]:
+    """Clear a session's conversation history. Does not clear user memory."""
     clear_session(session_id)
     log(f"Cleared session {session_id}")
     return {"status": "cleared", "session_id": session_id}
