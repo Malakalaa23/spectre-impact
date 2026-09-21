@@ -14,6 +14,8 @@ Endpoints:
     POST /api/chat                — Lya chat endpoint.
     POST /api/chat/clear          — clear a session's history.
     POST /api/tts                 — text-to-speech (MP3 output).
+    POST /api/feedback            — record user feedback on an AI output.
+    GET  /api/feedback/stats      — aggregate feedback counts (accuracy).
 
 Design notes:
     - BFS delegates to backend.analysis.change_analysis_engine.analyze_impact().
@@ -22,6 +24,8 @@ Design notes:
     - A background task auto-fires synthetic PR events every 30 seconds.
     - user_id is preferred over session_id for cross-session memory; the
       server sets a signed cookie on first contact and reuses it after.
+    - Every analyzed PR is added to the RAG knowledge base (learning loop),
+      so future queries can cite it as a past incident.
 """
 
 import sys
@@ -93,6 +97,9 @@ from database import (
     save_analysis,
     is_commit_analyzed,
     save_commit_analysis,
+    save_feedback,
+    get_feedback,
+    get_feedback_stats,
 )
 from github_client import (
     post_github_comment,
@@ -402,6 +409,27 @@ class ChatResponse(BaseModel):
     tool_calls: list[str] = []
 
 
+class FeedbackRequest(BaseModel):
+    """
+    User feedback on an AI-generated output.
+
+    The verdict drives the learning loop: every "correct" is a positive
+    signal, every "incorrect" a negative one. Notes are optional, capped
+    at 1000 chars to keep the table small.
+
+    target_type must be one of the four outputs we produce:
+        analysis       — the blast radius + business impact summary
+        insight        — the AI severity / simulation / rollback text
+        code_review    — the code quality verdict
+        chat_response  — a Lya reply
+    """
+    target_type: str = Field(..., pattern="^(analysis|insight|code_review|chat_response)$")
+    target_id: str = Field(..., min_length=1, max_length=128)
+    verdict: str = Field(..., pattern="^(correct|incorrect|partial)$")
+    user_id: str | None = Field(None, max_length=128)
+    notes: str | None = Field(None, max_length=1000)
+
+
 class TTSRequest(BaseModel):
     text: str = Field(..., min_length=1, max_length=2000)
     language: str = Field("auto", pattern="^(auto|ar|en)$")
@@ -574,6 +602,75 @@ async def chat_clear(session_id: str) -> dict[str, Any]:
 
 
 # -------------------------------------------------------------------
+# Feedback (AI learning loop)
+# -------------------------------------------------------------------
+@app.post("/api/feedback")
+async def submit_feedback(req: FeedbackRequest, request: Request) -> dict[str, Any]:
+    """
+    Record feedback on an AI-generated output.
+
+    user_id resolution is the same as /api/chat: body, then cookie, then
+    a fresh UUID stored on the session.
+
+    Returns the new row's id plus the current aggregate stats, so the
+    frontend can show "thanks, accuracy is now X%" without a second call.
+    """
+    # Resolve user_id
+    user_id = req.user_id
+    if not user_id:
+        user_id = request.session.get("spectre_user_id")
+    if not user_id:
+        user_id = str(uuid.uuid4())
+    request.session["spectre_user_id"] = user_id
+
+    # Cap the notes string at the Pydantic limit; strip trailing whitespace
+    notes = (req.notes or "").strip() or None
+
+    try:
+        feedback_id = save_feedback(
+            target_type=req.target_type,
+            target_id=req.target_id,
+            verdict=req.verdict,
+            user_id=user_id,
+            notes=notes,
+        )
+    except ValueError as exc:
+        # Pydantic pattern should catch this first, but defense in depth
+        log(f"Feedback rejected: {exc}")
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+
+    log(
+        f"/api/feedback id={feedback_id} type={req.target_type} "
+        f"target={req.target_id} verdict={req.verdict} user={user_id}"
+    )
+
+    return {
+        "status": "recorded",
+        "feedback_id": feedback_id,
+        "user_id": user_id,
+        "stats": get_feedback_stats(),
+    }
+
+
+@app.get("/api/feedback/stats")
+def feedback_stats() -> dict[str, Any]:
+    """Return aggregate feedback counts and current accuracy."""
+    return get_feedback_stats()
+
+
+@app.get("/api/feedback/recent")
+def feedback_recent(limit: int = 20) -> dict[str, Any]:
+    """
+    Return the most recent feedback entries.
+
+    Bounded to 100 to keep responses small. Used by the dashboard for
+    the "the AI learned this" demo panel.
+    """
+    limit = max(1, min(limit, 100))
+    return {"count": limit, "entries": get_feedback(limit)}
+
+
+# -------------------------------------------------------------------
 # Text-to-speech
 # -------------------------------------------------------------------
 @app.post("/api/tts")
@@ -717,6 +814,36 @@ def run_analysis_pipeline(pr_number: int, repo_name: str, action: str) -> None:
         log(f"Comment posted to PR #{pr_number}")
     except Exception as e:
         log(f"GitHub comment failed: {e}\n{traceback.format_exc()}")
+
+    # Learning loop: add this analysis to the RAG knowledge base so future
+    # queries can cite it as a past incident. Runs after the GitHub comment
+    # so that a comment failure doesn't block the knowledge base growth, and
+    # vice versa. Any failure here is logged and swallowed — RAG growth must
+    # never break the main pipeline.
+    try:
+        from rag.populate import add_single_document
+
+        doc_id = f"inc_pr_{pr_number}_{int(datetime.now(timezone.utc).timestamp())}"
+        text = (
+            f"Past incident: PR #{pr_number} in {repo_name}\n"
+            f"Severity: {insights.get('severity', 'Unknown')}\n"
+            f"Changed resource: {blast.get('changed_resource', 'unknown')}\n"
+            f"Business impact: {blast.get('business_impact', 0)}%\n"
+            f"Affected services: {', '.join(blast.get('affected_services', [])[:15])}\n"
+        )
+        simulation = insights.get("simulation")
+        if simulation:
+            text += f"Summary: {simulation[:400]}"
+
+        add_single_document(
+            doc_id=doc_id,
+            text=text,
+            metadata={"pr_number": pr_number, "repo": repo_name},
+            doc_type="incident",
+        )
+        log(f"Added PR #{pr_number} to RAG knowledge base")
+    except Exception as e:
+        log(f"RAG addition failed: {e}")
 
 
 # -------------------------------------------------------------------
