@@ -8,19 +8,31 @@ The vector store holds natural-language documents about:
     - Past PR incidents (from history.db)
 
 Embeddings:
-    Uses `sentence-transformers` with `all-MiniLM-L6-v2` — a 90MB model
+    Uses `sentence-transformers` with IBM's
+    `granite-embedding-97m-multilingual-r2` — a 97M-parameter model
     that runs on CPU. No API key required. Free forever. Works offline.
 
     Why this model:
-        - 384-dimensional embeddings (fast, small, good quality)
-        - ~90MB download (one time, cached locally)
-        - ~50-200ms per embedding on CPU
-        - Benchmarks rival models 3x its size on retrieval tasks
-        - Native support in sentence-transformers, extremely stable
+        - Native Arabic + English in one shared vector space. No
+          translation step, no cross-lingual routing, no second model.
+        - 384-dimensional embeddings (same shape as the previous model,
+          so the ChromaDB collection schema does not change).
+        - 32,768-token context. Our longest document is ~1,200 tokens,
+          so nothing is truncated. The previous model capped at 256
+          tokens and was silently cutting documents in half.
+        - Scores 60.3 on Multilingual MTEB Retrieval — highest among
+          open multilingual embedding models under 100M parameters.
+        - Apache 2.0 license.
+        - Requires transformers>=4.48.0 (ModernBERT architecture).
 
     The model is loaded once at first use and cached in module memory.
-    On Hugging Face Spaces, the download happens during the build or
-    first query (~30-60 seconds) and is then instant.
+    First run downloads ~390MB from Hugging Face. After that it reads
+    from the local cache.
+
+    IMPORTANT: switching embedding models invalidates every existing
+    vector. The old embeddings live in a different semantic space and
+    cannot be queried with the new model's vectors. Run
+    `reset_collection()` and re-populate after changing EMBEDDING_MODEL.
 
 Public API:
     get_collection()             — lazy singleton ChromaDB collection
@@ -51,10 +63,14 @@ logger = logging.getLogger(__name__)
 # ---------------------------------------------------------------------------
 DB_PATH = Path(__file__).resolve().parents[1] / "rag_db"
 COLLECTION_NAME = "spectre_knowledge"
-EMBEDDING_MODEL = "all-MiniLM-L6-v2"
-EMBEDDING_DIM = 384   # dimension of all-MiniLM-L6-v2
+EMBEDDING_MODEL = "ibm-granite/granite-embedding-97m-multilingual-r2"
+EMBEDDING_DIM = 384   # output dimension of the granite 97m model
 BATCH_SIZE = 64       # number of docs per encoding batch (CPU-friendly)
-MAX_TEXT_CHARS = 8000
+
+# The model supports 32,768 tokens. 32,000 characters is a conservative
+# ceiling — well under the token limit for English and Arabic, and high
+# enough that no document in the current corpus gets cut.
+MAX_TEXT_CHARS = 32000
 
 
 # ---------------------------------------------------------------------------
@@ -79,9 +95,8 @@ def _get_model() -> SentenceTransformer:
     """
     Get or create the SentenceTransformer model.
 
-    Downloads the model on first use (~90MB), then caches it in memory.
-    On Hugging Face Spaces, the model download happens once and persists
-    for the lifetime of the container.
+    First run downloads ~390MB from Hugging Face, then caches it on
+    disk and in memory. Subsequent processes read from the cache.
     """
     global _model
     if _model is None:
@@ -306,7 +321,9 @@ def reset_collection() -> None:
     """
     Delete and recreate the collection. Used before re-population.
 
-    WARNING: destroys all stored documents.
+    WARNING: destroys all stored documents. Required after changing
+    EMBEDDING_MODEL, because old vectors are in a different semantic
+    space and cannot be queried by the new model.
     """
     global _collection
     client = _get_client()

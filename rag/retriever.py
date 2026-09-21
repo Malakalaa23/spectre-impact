@@ -5,9 +5,18 @@ Given a user query or set of affected services, this module retrieves
 the most relevant documents and assembles them into a single context
 string that the LLM can use as grounding.
 
+Language handling:
+    The embedding model (`ibm-granite/granite-embedding-97m-multilingual-r2`)
+    is multilingual. Arabic and English queries embed into the same
+    vector space as the documents, so no translation step is needed.
+    Earlier versions of this module translated Arabic queries to
+    English before embedding because the previous model was English-only.
+    That workaround is gone — it would degrade retrieval quality now,
+    since the model already understands Arabic directly.
+
 Public API:
-    build_context(query, affected_services=None, max_docs=8) -> str
     retrieve(query, n_results, doc_type) -> list[dict]
+    build_context(query, affected_services, max_docs) -> str
 """
 
 from __future__ import annotations
@@ -21,6 +30,9 @@ from rag.vector_store import search_similar
 logger = logging.getLogger(__name__)
 
 
+# ---------------------------------------------------------------------------
+# Low-level retrieval
+# ---------------------------------------------------------------------------
 def retrieve(
     query: str,
     n_results: int = 5,
@@ -30,7 +42,7 @@ def retrieve(
     Retrieve the top-K most similar documents as a list of dicts.
 
     Args:
-        query: Natural-language search query.
+        query: Natural-language search query (any supported language).
         n_results: How many docs to return.
         doc_type: Optional filter ("service", "incident", "business", "resource_map").
 
@@ -38,6 +50,9 @@ def retrieve(
         A list of dicts: [{id, text, metadata, distance}, ...], sorted by
         distance ascending (closest first).
     """
+    if not query or not query.strip():
+        return []
+
     results = search_similar(query, n_results=n_results, doc_type=doc_type)
 
     ids = (results.get("ids") or [[]])[0]
@@ -56,6 +71,9 @@ def retrieve(
     return out
 
 
+# ---------------------------------------------------------------------------
+# Context building
+# ---------------------------------------------------------------------------
 def build_context(
     query: str = "",
     affected_services: list[str] | None = None,
@@ -118,6 +136,7 @@ def build_context(
         except Exception as exc:  # noqa: BLE001
             logger.warning("Business retrieval failed: %s", exc)
 
+    # Deduplicate by id, keeping first occurrence
     seen: set[str] = set()
     unique: list[dict[str, Any]] = []
     for doc in all_docs:
