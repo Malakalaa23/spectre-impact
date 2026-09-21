@@ -7,6 +7,7 @@ Usage:
     python test_spectre.py            # run all
     python test_spectre.py live       # only live feed tests
     python test_spectre.py landing    # only landing preset tests
+    python test_spectre.py memory     # only memory / mood / incident tests
     python test_spectre.py rag        # only RAG tests
     python test_spectre.py chat       # only chat tests
     python test_spectre.py tts        # only TTS tests
@@ -143,13 +144,141 @@ def test_landing_presets() -> None:
                 for k in ("headline", "subheadline", "welcome_message", "example_prompts", "tts_default_voice")
             )
             record(group, f"{lang} preset complete", has_all)
-        # Verify Arabic preset uses Egyptian dialect markers
         ar = presets.get("ar", {})
         welcome = ar.get("welcome_message", "")
         has_arabic = any("\u0600" <= c <= "\u06ff" for c in welcome)
         record(group, "ar preset contains Arabic characters", has_arabic)
     except Exception as exc:
         record(group, "landing presets reachable", False, str(exc))
+
+
+# ===========================================================================
+# GROUP: memory — Session context + mood + incidents
+# ===========================================================================
+def test_memory_session_tracking() -> None:
+    group = "memory"
+    try:
+        from chat.memory import touch_session, clear_user
+
+        user_id = "test-memory-user"
+        clear_user(user_id)
+
+        # New session — turn 1
+        ctx = touch_session(user_id, "sess-A")
+        record(group, "new session starts at turn 1", ctx.get("turn_count") == 1,
+               f"turn_count={ctx.get('turn_count')}")
+        record(group, "new session starts at session_count 1", ctx.get("session_count") == 1,
+               f"session_count={ctx.get('session_count')}")
+
+        # Same session — turn 2
+        ctx = touch_session(user_id, "sess-A")
+        record(group, "same session increments turn_count", ctx.get("turn_count") == 2,
+               f"turn_count={ctx.get('turn_count')}")
+        record(group, "same session keeps session_count", ctx.get("session_count") == 1,
+               f"session_count={ctx.get('session_count')}")
+
+        # New session — turn 1 again
+        ctx = touch_session(user_id, "sess-B")
+        record(group, "new session resets turn_count", ctx.get("turn_count") == 1,
+               f"turn_count={ctx.get('turn_count')}")
+        record(group, "new session bumps session_count", ctx.get("session_count") == 2,
+               f"session_count={ctx.get('session_count')}")
+
+        clear_user(user_id)
+    except Exception as exc:
+        record(group, "session tracking", False, str(exc))
+
+
+def test_memory_mood_signals() -> None:
+    group = "memory"
+    try:
+        from chat.memory import (
+            touch_session,
+            record_mood_signal,
+            get_session_context,
+            clear_user,
+        )
+
+        user_id = "test-mood-user"
+        clear_user(user_id)
+        touch_session(user_id, "sess-mood")
+
+        ctx = record_mood_signal(user_id, "vent")
+        record(group, "vent signal recorded", "vent" in (ctx.get("mood_signals") or []),
+               f"signals={ctx.get('mood_signals')}")
+        record(group, "vent produces stressed/frustrated mood",
+               ctx.get("mood") in ("stressed", "frustrated"),
+               f"mood={ctx.get('mood')}")
+
+        record_mood_signal(user_id, "all_caps")
+        record_mood_signal(user_id, "exclamations")
+        ctx = get_session_context(user_id)
+        record(group, "all_caps recorded", "all_caps" in (ctx.get("mood_signals") or []))
+        record(group, "exclamations recorded", "exclamations" in (ctx.get("mood_signals") or []))
+        record(group, "high score yields frustrated", ctx.get("mood") == "frustrated",
+               f"mood={ctx.get('mood')}")
+
+        clear_user(user_id)
+    except Exception as exc:
+        record(group, "mood signals", False, str(exc))
+
+
+def test_memory_incidents() -> None:
+    group = "memory"
+    try:
+        from chat.memory import (
+            touch_session,
+            record_incident,
+            get_session_context,
+            clear_user,
+        )
+
+        user_id = "test-incidents-user"
+        clear_user(user_id)
+        touch_session(user_id, "sess-incidents")
+
+        record_incident(user_id, "payment_service", pr=5)
+        record_incident(user_id, "customer_database", pr=3)
+
+        ctx = get_session_context(user_id)
+        incidents = ctx.get("recent_incidents") or []
+        record(group, "incidents recorded", len(incidents) >= 2, f"count={len(incidents)}")
+
+        services = [i["service"] for i in incidents]
+        record(group, "payment_service tracked", "payment_service" in services)
+        record(group, "customer_database tracked", "customer_database" in services)
+
+        clear_user(user_id)
+    except Exception as exc:
+        record(group, "incidents", False, str(exc))
+
+
+def test_memory_clear() -> None:
+    group = "memory"
+    try:
+        from chat.memory import (
+            touch_session,
+            record_incident,
+            clear_user,
+            get_session_context,
+        )
+
+        user_id = "test-clear-user"
+        touch_session(user_id, "sess-clear")
+        record_incident(user_id, "payment_service", pr=5)
+
+        ctx = get_session_context(user_id)
+        has_state = ctx.get("session_count", 0) > 0
+        record(group, "state exists before clear", has_state)
+
+        clear_user(user_id)
+
+        ctx = get_session_context(user_id)
+        record(group, "session_count reset to 0", ctx.get("session_count", 0) == 0)
+        record(group, "incidents reset to empty", len(ctx.get("recent_incidents", [])) == 0)
+        record(group, "mood reset to unknown", ctx.get("mood") in ("unknown", ""))
+    except Exception as exc:
+        record(group, "clear user", False, str(exc))
 
 
 # ===========================================================================
@@ -414,6 +543,12 @@ TESTS: dict[str, list[Callable]] = {
     "landing": [
         server_required("landing", test_landing_presets),
     ],
+    "memory": [
+        test_memory_session_tracking,
+        test_memory_mood_signals,
+        test_memory_incidents,
+        test_memory_clear,
+    ],
     "rag": [
         test_rag_collection_stats,
         test_rag_retrieval,
@@ -457,7 +592,6 @@ def main() -> None:
                 test_fn()
             except Exception as exc:
                 record(group, test_fn.__name__, False, f"unhandled: {exc}")
-        # 2-second breather between groups so the server can recover
         if len(requested) > 1:
             time.sleep(2)
 
