@@ -1,50 +1,106 @@
 # Estimated percentage of users affected when a component is unavailable.
 # The engine uses the maximum value among all affected nodes (worst case).
+#
+# peak_hours: the time window (Africa/Cairo local) when this component
+#             carries the most traffic. Used by Lya when reasoning about
+#             whether it's safe to merge now or schedule for later.
+#
+# avg_daily_transaction_value: approximate USD value of transactions that
+#             flow through this component per day. 0 for pure
+#             infrastructure nodes that carry no direct revenue.
+
 customer_database:
   feature: Customer accounts and payments
   users_percentage: 100
+  peak_hours: "09:00-18:00"
+  avg_daily_transaction_value: 8000000
+
 redis_cache:
   feature: Session and authentication cache
   users_percentage: 80
+  peak_hours: "09:00-18:00"
+  avg_daily_transaction_value: 0
+
 login_service:
   feature: User authentication
   users_percentage: 100
+  peak_hours: "07:00-09:00,17:00-20:00"
+  avg_daily_transaction_value: 0
+
 payment_service:
   feature: Payment processing
   users_percentage: 85
+  peak_hours: "13:00-17:00"
+  avg_daily_transaction_value: 3500000
+
 profile_service:
   feature: Customer profile management
   users_percentage: 90
+  peak_hours: "10:00-16:00"
+  avg_daily_transaction_value: 0
+
 login_api:
   feature: Login API
   users_percentage: 100
+  peak_hours: "07:00-09:00,17:00-20:00"
+  avg_daily_transaction_value: 0
+
 checkout_api:
   feature: Checkout API
   users_percentage: 85
+  peak_hours: "13:00-17:00"
+  avg_daily_transaction_value: 3200000
+
 profile_api:
   feature: Profile API
   users_percentage: 90
+  peak_hours: "10:00-16:00"
+  avg_daily_transaction_value: 0
+
 web_frontend:
   feature: Web application
   users_percentage: 95
+  peak_hours: "09:00-21:00"
+  avg_daily_transaction_value: 5000000
+
 mobile_app:
   feature: Mobile application
   users_percentage: 70
+  peak_hours: "07:00-23:00"
+  avg_daily_transaction_value: 3000000
+
 login_journey:
   feature: User sign-in
   users_percentage: 100
+  peak_hours: "07:00-09:00,17:00-20:00"
+  avg_daily_transaction_value: 0
+
 checkout_journey:
   feature: Checkout
   users_percentage: 85
+  peak_hours: "14:00-17:00"
+  avg_daily_transaction_value: 1200000
+
 profile_journey:
   feature: Profile updates
   users_percentage: 90
+  peak_hours: "10:00-16:00"
+  avg_daily_transaction_value: 0
+
 customer_retention:
   feature: Customer retention
   users_percentage: 90
+  peak_hours: "09:00-18:00"
+  avg_daily_transaction_value: 0
+
 revenue_generation:
   feature: Revenue generation
   users_percentage: 85
+  peak_hours: "14:00-17:00"
+  avg_daily_transaction_value: 1200000
+
 customer_satisfaction:
   feature: Customer satisfaction
   users_percentage: 90
+  peak_hours: "09:00-18:00"
+  avg_daily_transaction_value: 0

@@ -5,10 +5,13 @@
 # deployment or infrastructure change.
 #
 # Every node contains:
-#   type         -> What kind of component it is
-#   owner        -> Responsible team
-#   criticality  -> low | medium | high | critical
-#   children     -> Components that depend on this node
+#   type            -> What kind of component it is
+#   owner           -> Responsible team
+#   criticality     -> low | medium | high | critical
+#   customer_facing -> true if the customer directly interacts
+#                      with this component. Lya uses this to answer
+#                      "which of these are customer-facing?"
+#   children        -> Components that depend on this node
 #
 # Impact always flows DOWN.
 #
@@ -38,6 +41,7 @@ nodes:
     type: database
     owner: backend-team
     criticality: critical
+    customer_facing: false
     children:
       - login_service
       - payment_service
@@ -47,6 +51,7 @@ nodes:
     type: cache
     owner: backend-team
     criticality: medium
+    customer_facing: false
     children:
       - login_service
 
@@ -58,6 +63,7 @@ nodes:
     type: service
     owner: backend-team
     criticality: high
+    customer_facing: false
     children:
       - login_api
 
@@ -65,6 +71,7 @@ nodes:
     type: service
     owner: payments-team
     criticality: critical
+    customer_facing: false
     children:
       - checkout_api
 
@@ -72,6 +79,7 @@ nodes:
     type: service
     owner: backend-team
     criticality: medium
+    customer_facing: false
     children:
       - profile_api
 
@@ -83,6 +91,7 @@ nodes:
     type: api
     owner: backend-team
     criticality: high
+    customer_facing: false
     children:
       - web_frontend
       - mobile_app
@@ -91,6 +100,7 @@ nodes:
     type: api
     owner: payments-team
     criticality: critical
+    customer_facing: false
     children:
       - web_frontend
       - mobile_app
@@ -99,6 +109,7 @@ nodes:
     type: api
     owner: backend-team
     criticality: medium
+    customer_facing: false
     children:
       - web_frontend
 
@@ -110,6 +121,7 @@ nodes:
     type: frontend
     owner: frontend-team
     criticality: high
+    customer_facing: true
     children:
       - login_journey
       - checkout_journey
@@ -119,6 +131,7 @@ nodes:
     type: mobile_app
     owner: mobile-team
     criticality: high
+    customer_facing: true
     children:
       - login_journey
       - checkout_journey
@@ -131,6 +144,7 @@ nodes:
     type: customer_journey
     owner: product-team
     criticality: critical
+    customer_facing: true
     children:
       - customer_retention
 
@@ -138,6 +152,7 @@ nodes:
     type: customer_journey
     owner: product-team
     criticality: critical
+    customer_facing: true
     children:
       - revenue_generation
 
@@ -145,6 +160,7 @@ nodes:
     type: customer_journey
     owner: product-team
     criticality: medium
+    customer_facing: true
     children:
       - customer_satisfaction
 
@@ -156,16 +172,19 @@ nodes:
     type: business
     owner: management
     criticality: high
+    customer_facing: false
     children: []
 
   revenue_generation:
     type: business
     owner: management
     criticality: critical
+    customer_facing: false
     children: []
 
   customer_satisfaction:
     type: business
     owner: management
     criticality: medium
+    customer_facing: false
     children: []
