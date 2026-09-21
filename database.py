@@ -1,6 +1,39 @@
+"""
+database.py — SQLite persistence for Spectre Impact.
+
+Stores:
+    - PR analyses (webhook results)
+    - Commit analyses (push results)
+    - User feedback on AI-generated insights (for the AI learning loop)
+
+Public API:
+    PR analyses:
+        init_db()
+        save_analysis(pr_number, repo_name, bfs_result, ai_result)
+        get_all_analyses(limit)
+        get_pr_analysis(pr_number)
+
+    Commit analyses:
+        init_commit_table()
+        save_commit_analysis(commit_sha, repo_name, branch, changed_files, ...)
+        is_commit_analyzed(commit_sha)
+        get_commit_analysis(commit_sha)
+        get_all_commit_analyses(limit)
+
+    Feedback (AI learning loop):
+        init_feedback_table()
+        save_feedback(target_type, target_id, verdict, user_id, notes)
+        get_feedback(limit)
+        get_feedback_stats()
+
+    All tables:
+        init_all()
+"""
+
 import json
 import sqlite3
 from datetime import datetime, timezone
+
 
 DB_FILE = "history.db"
 
@@ -11,6 +44,9 @@ def _get_connection():
     return conn
 
 
+# ===========================================================================
+# PR analyses
+# ===========================================================================
 def init_db():
     conn = _get_connection()
     conn.execute(
@@ -67,9 +103,12 @@ def save_analysis(pr_number: int, repo_name: str, bfs_result: dict, ai_result: d
 
 def _row_to_dict(row: sqlite3.Row) -> dict:
     record = dict(row)
-    for field in ("affected_services", "rollback", "validation", "tokens_used"):
+    for field in ("affected_services", "rollback", "validation", "tokens_used", "suggestions"):
         if record.get(field):
-            record[field] = json.loads(record[field])
+            try:
+                record[field] = json.loads(record[field])
+            except (json.JSONDecodeError, TypeError):
+                pass
     return record
 
 
@@ -95,12 +134,11 @@ def get_pr_analysis(pr_number: int):
     return [_row_to_dict(row) for row in rows]
 
 
-# ============================================================
-# NEW: Commit analysis functions (for inline feedback)
-# ============================================================
-
+# ===========================================================================
+# Commit analyses
+# ===========================================================================
 def init_commit_table():
-    """Create the commit_analyses table if it doesn't exist"""
+    """Create the commit_analyses table if it doesn't exist."""
     conn = _get_connection()
     conn.execute(
         """
@@ -121,13 +159,16 @@ def init_commit_table():
     conn.close()
 
 
-def save_commit_analysis(commit_sha: str, repo_name: str, branch: str,
-                         changed_files: list, affected_services: list,
-                         business_impact: int, suggestions: list):
-    """
-    Save a commit analysis to the database.
-    ✅ FIXED: Accepts 7 parameters (including suggestions)
-    """
+def save_commit_analysis(
+    commit_sha: str,
+    repo_name: str,
+    branch: str,
+    changed_files: list,
+    affected_services: list,
+    business_impact: int,
+    suggestions: list,
+):
+    """Save a commit analysis to the database."""
     conn = _get_connection()
     try:
         conn.execute(
@@ -145,8 +186,8 @@ def save_commit_analysis(commit_sha: str, repo_name: str, branch: str,
                 json.dumps(affected_services),
                 business_impact,
                 json.dumps(suggestions),
-                datetime.now(timezone.utc).isoformat()
-            )
+                datetime.now(timezone.utc).isoformat(),
+            ),
         )
         conn.commit()
     finally:
@@ -154,12 +195,9 @@ def save_commit_analysis(commit_sha: str, repo_name: str, branch: str,
 
 
 def is_commit_analyzed(commit_sha: str) -> bool:
-    """
-    Check if a commit has already been analyzed.
-    """
+    """Check if a commit has already been analyzed."""
     conn = _get_connection()
     try:
-        # Check if the table exists first
         table_exists = conn.execute(
             "SELECT name FROM sqlite_master WHERE type='table' AND name='commit_analyses'"
         ).fetchone()
@@ -174,9 +212,7 @@ def is_commit_analyzed(commit_sha: str) -> bool:
 
 
 def get_commit_analysis(commit_sha: str) -> dict:
-    """
-    Get a commit analysis by SHA.
-    """
+    """Get a commit analysis by SHA."""
     conn = _get_connection()
     try:
         table_exists = conn.execute(
@@ -185,7 +221,8 @@ def get_commit_analysis(commit_sha: str) -> dict:
         if not table_exists:
             return None
         row = conn.execute(
-            "SELECT * FROM commit_analyses WHERE commit_sha = ? ORDER BY id DESC", (commit_sha,)
+            "SELECT * FROM commit_analyses WHERE commit_sha = ? ORDER BY id DESC",
+            (commit_sha,),
         ).fetchone()
         if row:
             return dict(row)
@@ -195,9 +232,7 @@ def get_commit_analysis(commit_sha: str) -> dict:
 
 
 def get_all_commit_analyses(limit: int = 50):
-    """
-    Get all commit analyses.
-    """
+    """Get all commit analyses."""
     conn = _get_connection()
     try:
         table_exists = conn.execute(
@@ -213,19 +248,157 @@ def get_all_commit_analyses(limit: int = 50):
         conn.close()
 
 
-# ============================================================
-# Initialize tables on module load
-# ============================================================
-init_db()
-init_commit_table()
+# ===========================================================================
+# Feedback — AI learning loop
+# ===========================================================================
+def init_feedback_table():
+    """
+    Create the feedback table if it doesn't exist.
 
-# ============================================================
-# Quick self‑test (run with `python database.py`)
-# ============================================================
+    Schema:
+        id           — auto increment
+        target_type  — "analysis" | "insight" | "code_review" | "chat_response"
+        target_id    — ID of the thing being rated
+        verdict      — "correct" | "incorrect" | "partial"
+        user_id      — who gave the feedback
+        notes        — optional free-text
+        created_at   — when
+
+    Why this table exists:
+        Every "correct" verdict becomes a positive training signal.
+        Every "incorrect" verdict becomes a negative one.
+        Over time, this becomes a labeled dataset we can use to fine-tune
+        the model or improve retrieval. This is the mechanism behind
+        "the AI learns from its mistakes."
+    """
+    conn = _get_connection()
+    conn.execute(
+        """
+        CREATE TABLE IF NOT EXISTS feedback (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            target_type TEXT NOT NULL,
+            target_id TEXT NOT NULL,
+            verdict TEXT NOT NULL,
+            user_id TEXT,
+            notes TEXT,
+            created_at TEXT NOT NULL
+        )
+        """
+    )
+    conn.execute(
+        "CREATE INDEX IF NOT EXISTS idx_feedback_target ON feedback(target_type, target_id)"
+    )
+    conn.execute(
+        "CREATE INDEX IF NOT EXISTS idx_feedback_verdict ON feedback(verdict)"
+    )
+    conn.commit()
+    conn.close()
+
+
+def save_feedback(
+    target_type: str,
+    target_id: str,
+    verdict: str,
+    user_id: str | None = None,
+    notes: str | None = None,
+) -> int:
+    """Store one feedback entry. Returns the new row's id."""
+    if verdict not in ("correct", "incorrect", "partial"):
+        raise ValueError(f"Invalid verdict: {verdict}")
+
+    conn = _get_connection()
+    try:
+        cursor = conn.execute(
+            """
+            INSERT INTO feedback (target_type, target_id, verdict, user_id, notes, created_at)
+            VALUES (?, ?, ?, ?, ?, ?)
+            """,
+            (
+                target_type,
+                str(target_id),
+                verdict,
+                user_id or "anonymous",
+                notes or "",
+                datetime.now(timezone.utc).isoformat(),
+            ),
+        )
+        new_id = cursor.lastrowid
+        conn.commit()
+        return new_id
+    finally:
+        conn.close()
+
+
+def get_feedback(limit: int = 100):
+    """Return the most recent feedback entries."""
+    conn = _get_connection()
+    try:
+        table_exists = conn.execute(
+            "SELECT name FROM sqlite_master WHERE type='table' AND name='feedback'"
+        ).fetchone()
+        if not table_exists:
+            return []
+        rows = conn.execute(
+            "SELECT * FROM feedback ORDER BY id DESC LIMIT ?", (limit,)
+        ).fetchall()
+        return [dict(row) for row in rows]
+    finally:
+        conn.close()
+
+
+def get_feedback_stats() -> dict:
+    """
+    Return aggregate feedback counts.
+
+    Used by the /api/feedback/stats endpoint and the dashboard.
+    """
+    conn = _get_connection()
+    try:
+        table_exists = conn.execute(
+            "SELECT name FROM sqlite_master WHERE type='table' AND name='feedback'"
+        ).fetchone()
+        if not table_exists:
+            return {"correct": 0, "incorrect": 0, "partial": 0, "total": 0, "accuracy": None}
+
+        rows = conn.execute(
+            "SELECT verdict, COUNT(*) as count FROM feedback GROUP BY verdict"
+        ).fetchall()
+    finally:
+        conn.close()
+
+    stats = {"correct": 0, "incorrect": 0, "partial": 0, "total": 0}
+    for row in rows:
+        stats[row["verdict"]] = row["count"]
+        stats["total"] += row["count"]
+
+    if stats["total"] > 0:
+        stats["accuracy"] = round(stats["correct"] / stats["total"] * 100, 1)
+    else:
+        stats["accuracy"] = None
+
+    return stats
+
+
+# ===========================================================================
+# Init all tables
+# ===========================================================================
+def init_all():
+    """Initialize every table. Safe to call multiple times."""
+    init_db()
+    init_commit_table()
+    init_feedback_table()
+
+
+init_all()
+
+
+# ===========================================================================
+# Self-test (run with `python database.py`)
+# ===========================================================================
 if __name__ == "__main__":
-    print("🧪 Testing database functions...")
-    
-    # Test commit functions
+    print("Testing database functions...")
+
+    # --- Test commit analysis ---
     test_sha = "test_commit_123"
     save_commit_analysis(
         test_sha,
@@ -234,19 +407,37 @@ if __name__ == "__main__":
         ["test.py"],
         ["service1", "service2"],
         75,
-        [{"file": "test.py", "line": 10, "suggestion": "Add null check"}]
+        [{"file": "test.py", "line": 10, "suggestion": "Add null check"}],
     )
-    
+
     result = is_commit_analyzed(test_sha)
-    print(f"✅ is_commit_analyzed: {result}")
-    
+    print(f"is_commit_analyzed: {result}")
+
     analysis = get_commit_analysis(test_sha)
-    print(f"✅ get_commit_analysis: {analysis is not None}")
-    
-    # Clean up
+    print(f"get_commit_analysis returned a row: {analysis is not None}")
+
     conn = _get_connection()
     conn.execute("DELETE FROM commit_analyses WHERE commit_sha = ?", (test_sha,))
     conn.commit()
     conn.close()
-    
-    print("✅ All tests passed!")
+
+    # --- Test feedback loop ---
+    fid = save_feedback(
+        target_type="analysis",
+        target_id="test-1",
+        verdict="correct",
+        user_id="test-user",
+        notes="Self-test entry",
+    )
+    print(f"save_feedback returned id: {fid}")
+
+    stats = get_feedback_stats()
+    print(f"feedback stats: {stats}")
+
+    # Cleanup
+    conn = _get_connection()
+    conn.execute("DELETE FROM feedback WHERE id = ?", (fid,))
+    conn.commit()
+    conn.close()
+
+    print("All tests passed.")

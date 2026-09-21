@@ -10,6 +10,14 @@ Reads from:
 Writes to:
     - ChromaDB collection "spectre_knowledge"
 
+Public API:
+    add_single_document(doc_id, text, metadata, doc_type) -> bool
+        Add one document without resetting the collection.
+        Used by the learning loop to grow the knowledge base.
+
+    populate(reset=False, dry_run=False)
+        Load all knowledge sources. Optionally resets first.
+
 Usage:
     python -m rag.populate --reset
     python -m rag.populate
@@ -51,6 +59,72 @@ DATA_DIR = ROOT / "backend" / "data"
 HISTORY_DB = ROOT / "history.db"
 
 
+# ===========================================================================
+# Learning loop — single-document addition
+# ===========================================================================
+def add_single_document(
+    doc_id: str,
+    text: str,
+    metadata: dict | None = None,
+    doc_type: str = "general",
+) -> bool:
+    """
+    Add a single document to the RAG collection without resetting it.
+
+    Used for the learning loop — every new incident or analysis gets added
+    to the knowledge base so future queries have more context to draw from.
+
+    Args:
+        doc_id:   Unique identifier (e.g., "inc_pr_5_1726500000").
+        text:     Document text.
+        metadata: Optional metadata dict.
+        doc_type: Category ("incident", "service", "business", etc.).
+
+    Returns:
+        True if added, False if the doc already exists or addition failed.
+    """
+    from rag.vector_store import get_collection, get_embedding
+
+    if not doc_id or not text:
+        logger.warning("add_single_document: empty doc_id or text")
+        return False
+
+    try:
+        collection = get_collection()
+    except Exception as exc:
+        logger.warning("add_single_document: could not open collection: %s", exc)
+        return False
+
+    # Skip if the document already exists
+    try:
+        existing = collection.get(ids=[doc_id])
+        if existing and existing.get("ids"):
+            logger.info("Doc %s already exists — skipping", doc_id)
+            return False
+    except Exception:
+        pass
+
+    try:
+        embedding = get_embedding(text)
+        meta = dict(metadata or {})
+        meta["type"] = doc_type
+
+        collection.add(
+            ids=[doc_id],
+            embeddings=[embedding],
+            documents=[text],
+            metadatas=[meta],
+        )
+        logger.info("Added single doc %s (type=%s)", doc_id, doc_type)
+        return True
+    except Exception as exc:
+        logger.warning("Failed to add single doc %s: %s", doc_id, exc)
+        return False
+
+
+# ===========================================================================
+# Bulk document builders
+# ===========================================================================
 def build_service_docs() -> tuple[list[str], list[str], list[dict], list[str]]:
     """Build documents from dependency_graph.yaml."""
     path = DATA_DIR / "dependency_graph.yaml"
@@ -332,7 +406,7 @@ def populate(reset: bool = False, dry_run: bool = False) -> None:
         metadatas=all_metas,
         doc_types=all_types,
     )
-    logger.info("✅ Added %d documents", added)
+    logger.info("Added %d documents", added)
 
     stats = collection_stats()
     logger.info("Collection stats: %s", stats)
