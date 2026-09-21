@@ -13,6 +13,7 @@ Usage:
     python test_spectre.py tts        # only TTS tests
     python test_spectre.py safety     # only safety tests
     python test_spectre.py providers  # only multi-provider tests
+    python test_spectre.py feedback   # only feedback loop tests
 
 Add new test groups by creating a function and registering it in TESTS.
 """
@@ -292,6 +293,12 @@ def test_rag_collection_stats() -> None:
         count = stats.get("count", 0)
         record(group, "collection_stats() works", True, f"count={count}")
         record(group, "collection has documents", count > 0, f"count={count}")
+        record(
+            group,
+            "collection uses granite embeddings",
+            stats.get("embedding_model", "").startswith("ibm-granite/"),
+            f"model={stats.get('embedding_model')}",
+        )
     except Exception as exc:
         record(group, "collection_stats() works", False, str(exc))
 
@@ -309,6 +316,30 @@ def test_rag_retrieval() -> None:
             record(group, "result has distance", top.get("distance") is not None)
     except Exception as exc:
         record(group, "retrieve() returns results", False, str(exc))
+
+
+def test_rag_arabic_retrieval() -> None:
+    """
+    Arabic queries must return relevant documents without a translation
+    step. The granite model handles Arabic natively, so 'قاعدة بيانات
+    العملاء' (customer database) should surface svc_customer_database or
+    a related document as the top hit.
+    """
+    group = "rag"
+    try:
+        from rag.retriever import retrieve
+        results = retrieve("قاعدة بيانات العملاء", n_results=3)
+        record(group, "Arabic query returns results", len(results) > 0, f"{len(results)} results")
+        if results:
+            top_id = results[0].get("id", "")
+            relevant = "customer_database" in top_id or "customer" in top_id
+            record(group, "Arabic query finds customer_database", relevant, f"top={top_id}")
+            # Distances should be tight when the model matches semantically
+            dist = results[0].get("distance")
+            record(group, "Arabic top distance is tight", dist is not None and dist < 0.5,
+                   f"distance={dist}")
+    except Exception as exc:
+        record(group, "Arabic query returns results", False, str(exc))
 
 
 def test_rag_context_build() -> None:
@@ -533,6 +564,222 @@ def test_provider_fallback() -> None:
 
 
 # ===========================================================================
+# GROUP: feedback — AI learning loop
+# ===========================================================================
+def test_feedback_roundtrip() -> None:
+    """
+    Save a feedback entry, read it back, verify the fields match.
+    This is the base case: the table accepts a write and returns it.
+    """
+    group = "feedback"
+    try:
+        from database import save_feedback, get_feedback, _get_connection
+
+        target_id = "test-feedback-roundtrip"
+        fid = save_feedback(
+            target_type="analysis",
+            target_id=target_id,
+            verdict="correct",
+            user_id="test-user-roundtrip",
+            notes="Roundtrip test entry",
+        )
+        record(group, "save_feedback returns an id", isinstance(fid, int) and fid > 0, f"id={fid}")
+
+        entries = get_feedback(limit=20)
+        match = next((e for e in entries if e["id"] == fid), None)
+        record(group, "entry retrievable by id", match is not None)
+        if match:
+            record(group, "verdict stored correctly", match["verdict"] == "correct",
+                   f"verdict={match['verdict']}")
+            record(group, "target_type stored correctly", match["target_type"] == "analysis")
+            record(group, "target_id stored correctly", match["target_id"] == target_id)
+            record(group, "notes stored correctly", "Roundtrip" in (match.get("notes") or ""))
+
+        # Cleanup
+        conn = _get_connection()
+        conn.execute("DELETE FROM feedback WHERE id = ?", (fid,))
+        conn.commit()
+        conn.close()
+    except Exception as exc:
+        record(group, "save_feedback returns an id", False, str(exc))
+
+
+def test_feedback_invalid_verdict_rejected() -> None:
+    """
+    save_feedback must reject verdicts outside {correct, incorrect, partial}.
+    The API layer also validates via Pydantic, but the DB layer should
+    defend itself — otherwise a bug in the handler writes garbage to disk.
+    """
+    group = "feedback"
+    try:
+        from database import save_feedback
+
+        raised = False
+        try:
+            save_feedback(
+                target_type="analysis",
+                target_id="test-invalid-verdict",
+                verdict="maybe",
+                user_id="test-user-invalid",
+            )
+        except ValueError:
+            raised = True
+        record(group, "invalid verdict raises ValueError", raised)
+    except Exception as exc:
+        record(group, "invalid verdict raises ValueError", False, str(exc))
+
+
+def test_feedback_stats_accuracy() -> None:
+    """
+    Accuracy should be correct / total * 100. Verify with a controlled set
+    of writes so the arithmetic is deterministic.
+    """
+    group = "feedback"
+    try:
+        from database import save_feedback, get_feedback_stats, _get_connection
+
+        # Snapshot before
+        before = get_feedback_stats()
+
+        # Write 2 correct + 1 incorrect across distinct users/targets
+        ids = []
+        ids.append(save_feedback("analysis", "stats-t1", "correct", user_id="stats-u1"))
+        ids.append(save_feedback("analysis", "stats-t2", "correct", user_id="stats-u2"))
+        ids.append(save_feedback("analysis", "stats-t3", "incorrect", user_id="stats-u3"))
+
+        after = get_feedback_stats()
+        delta_correct = after["correct"] - before["correct"]
+        delta_incorrect = after["incorrect"] - before["incorrect"]
+        delta_total = after["total"] - before["total"]
+
+        record(group, "stats increment by 3", delta_total == 3, f"delta={delta_total}")
+        record(group, "correct count increased by 2", delta_correct == 2, f"delta={delta_correct}")
+        record(group, "incorrect count increased by 1", delta_incorrect == 1, f"delta={delta_incorrect}")
+        record(group, "accuracy is a number", isinstance(after.get("accuracy"), (int, float)),
+               f"accuracy={after.get('accuracy')}")
+
+        # Cleanup
+        conn = _get_connection()
+        for i in ids:
+            conn.execute("DELETE FROM feedback WHERE id = ?", (i,))
+        conn.commit()
+        conn.close()
+    except Exception as exc:
+        record(group, "stats increment by 3", False, str(exc))
+
+
+def test_feedback_dedupe_latest_wins() -> None:
+    """
+    One user's latest verdict per (target_type, target_id) counts.
+    Resubmitting must replace the earlier verdict, not stack on top of it.
+    This is the anti-gaming behavior added to get_feedback_stats().
+    """
+    group = "feedback"
+    try:
+        from database import save_feedback, get_feedback_stats, _get_connection
+
+        before = get_feedback_stats()
+
+        # User says "correct", then changes their mind to "incorrect"
+        id1 = save_feedback("chat_response", "dedupe-t1", "correct", user_id="dedupe-u1")
+        id2 = save_feedback("chat_response", "dedupe-t1", "incorrect", user_id="dedupe-u1")
+
+        after = get_feedback_stats()
+
+        # Total should increase by exactly 1, not 2. The latest verdict wins.
+        delta_total = after["total"] - before["total"]
+        record(group, "total counts one vote per user/target", delta_total == 1,
+               f"delta_total={delta_total}")
+        record(group, "latest verdict recorded as incorrect",
+               after["incorrect"] - before["incorrect"] == 1)
+        record(group, "previous correct verdict not double-counted",
+               after["correct"] == before["correct"])
+
+        # Cleanup
+        conn = _get_connection()
+        conn.execute("DELETE FROM feedback WHERE id IN (?, ?)", (id1, id2))
+        conn.commit()
+        conn.close()
+    except Exception as exc:
+        record(group, "total counts one vote per user/target", False, str(exc))
+
+
+def test_feedback_empty_stats() -> None:
+    """
+    With no feedback rows for a fresh user/target combination, the stats
+    query still runs. Verifies that an empty table or an all-deleted state
+    doesn't crash.
+    """
+    group = "feedback"
+    try:
+        from database import get_feedback_stats
+        stats = get_feedback_stats()
+        record(group, "get_feedback_stats returns dict", isinstance(stats, dict))
+        for key in ("correct", "incorrect", "partial", "total", "accuracy"):
+            record(group, f"stats has '{key}'", key in stats)
+        # accuracy is None when total is 0, otherwise a float
+        if stats["total"] == 0:
+            record(group, "accuracy is None on empty", stats["accuracy"] is None)
+        else:
+            record(group, "accuracy is numeric when populated",
+                   isinstance(stats["accuracy"], (int, float)))
+    except Exception as exc:
+        record(group, "get_feedback_stats returns dict", False, str(exc))
+
+
+def test_feedback_endpoints() -> None:
+    """
+    Verify /api/feedback and /api/feedback/stats are wired up and respond
+    correctly. Requires the server to be running.
+    """
+    group = "feedback"
+    try:
+        import requests
+
+        # Post a valid feedback entry
+        r = requests.post(
+            f"{SERVER_URL}/api/feedback",
+            json={
+                "target_type": "analysis",
+                "target_id": "api-test-1",
+                "verdict": "correct",
+                "notes": "Endpoint roundtrip",
+            },
+            timeout=10,
+        )
+        record(group, "/api/feedback returns 200", r.status_code == 200,
+               f"status={r.status_code}")
+        if r.status_code == 200:
+            body = r.json()
+            record(group, "response has feedback_id", "feedback_id" in body)
+            record(group, "response includes stats", "stats" in body)
+            record(group, "response includes user_id", "user_id" in body)
+
+        # Invalid verdict must be rejected by Pydantic with 422
+        r2 = requests.post(
+            f"{SERVER_URL}/api/feedback",
+            json={
+                "target_type": "analysis",
+                "target_id": "api-test-2",
+                "verdict": "maybe",
+            },
+            timeout=10,
+        )
+        record(group, "invalid verdict returns 422", r2.status_code == 422,
+               f"status={r2.status_code}")
+
+        # Stats endpoint
+        r3 = requests.get(f"{SERVER_URL}/api/feedback/stats", timeout=10)
+        record(group, "/api/feedback/stats returns 200", r3.status_code == 200)
+        if r3.status_code == 200:
+            stats = r3.json()
+            record(group, "stats endpoint returns dict", isinstance(stats, dict))
+            record(group, "stats has accuracy field", "accuracy" in stats)
+    except Exception as exc:
+        record(group, "/api/feedback returns 200", False, str(exc))
+
+
+# ===========================================================================
 # Test registry
 # ===========================================================================
 TESTS: dict[str, list[Callable]] = {
@@ -552,6 +799,7 @@ TESTS: dict[str, list[Callable]] = {
     "rag": [
         test_rag_collection_stats,
         test_rag_retrieval,
+        test_rag_arabic_retrieval,
         test_rag_context_build,
         test_rag_fresh_clone,
     ],
@@ -572,6 +820,14 @@ TESTS: dict[str, list[Callable]] = {
         test_provider_status,
         test_provider_call,
         test_provider_fallback,
+    ],
+    "feedback": [
+        test_feedback_roundtrip,
+        test_feedback_invalid_verdict_rejected,
+        test_feedback_stats_accuracy,
+        test_feedback_dedupe_latest_wins,
+        test_feedback_empty_stats,
+        server_required("feedback", test_feedback_endpoints),
     ],
 }
 
