@@ -6,6 +6,22 @@ Stores:
     - Commit analyses (push results)
     - User feedback on AI-generated insights (for the AI learning loop)
 
+Concurrency:
+    The connection is opened with a 5-second busy timeout and WAL
+    journal mode. Under the concurrent feedback + webhook load the
+    demo is expected to hit, this avoids the "database is locked"
+    error that plain SQLite would raise.
+
+    WAL creates two sidecar files (history.db-wal, history.db-shm)
+    while the database is open. They are checkpointed back into
+    history.db when the last connection closes. Add both to
+    .gitignore.
+
+Feedback semantics:
+    One user's vote per (target_type, target_id) counts — the latest
+    one. If they change their mind, the new verdict replaces the old.
+    This is enforced at query time in get_feedback_stats().
+
 Public API:
     PR analyses:
         init_db()
@@ -33,14 +49,28 @@ Public API:
 import json
 import sqlite3
 from datetime import datetime, timezone
+from pathlib import Path
 
 
-DB_FILE = "history.db"
+# Anchor the database to the file's location, not the caller's cwd.
+# Without this, running the CLI from a subdirectory creates a second
+# empty history.db there and the app silently looks at fresh data.
+DB_FILE = Path(__file__).resolve().parent / "history.db"
+
+# Milliseconds to wait for a locked database before raising. Under
+# concurrent writes (feedback + webhook + live feed) SQLite would
+# otherwise fail instantly with "database is locked".
+BUSY_TIMEOUT_MS = 5000
 
 
 def _get_connection():
-    conn = sqlite3.connect(DB_FILE)
+    conn = sqlite3.connect(str(DB_FILE), timeout=BUSY_TIMEOUT_MS / 1000.0)
     conn.row_factory = sqlite3.Row
+    # WAL lets readers and writers coexist. Without it, a write holds an
+    # exclusive lock that blocks every other connection for the duration.
+    conn.execute("PRAGMA journal_mode=WAL")
+    conn.execute(f"PRAGMA busy_timeout={BUSY_TIMEOUT_MS}")
+    conn.execute("PRAGMA foreign_keys=ON")
     return conn
 
 
@@ -270,6 +300,10 @@ def init_feedback_table():
         Over time, this becomes a labeled dataset we can use to fine-tune
         the model or improve retrieval. This is the mechanism behind
         "the AI learns from its mistakes."
+
+    Every row is kept (an audit trail of who said what when), but the
+    stats query in get_feedback_stats() counts only the latest verdict
+    per (target_type, target_id, user_id).
     """
     conn = _get_connection()
     conn.execute(
@@ -290,6 +324,9 @@ def init_feedback_table():
     )
     conn.execute(
         "CREATE INDEX IF NOT EXISTS idx_feedback_verdict ON feedback(verdict)"
+    )
+    conn.execute(
+        "CREATE INDEX IF NOT EXISTS idx_feedback_user ON feedback(user_id)"
     )
     conn.commit()
     conn.close()
@@ -350,6 +387,11 @@ def get_feedback_stats() -> dict:
     """
     Return aggregate feedback counts.
 
+    Counts each user's latest verdict per (target_type, target_id).
+    A user who changes their mind gets one vote — their newest. This
+    prevents a single user from inflating the accuracy by re-submitting
+    "correct" on the same target.
+
     Used by the /api/feedback/stats endpoint and the dashboard.
     """
     conn = _get_connection()
@@ -358,10 +400,24 @@ def get_feedback_stats() -> dict:
             "SELECT name FROM sqlite_master WHERE type='table' AND name='feedback'"
         ).fetchone()
         if not table_exists:
-            return {"correct": 0, "incorrect": 0, "partial": 0, "total": 0, "accuracy": None}
+            return {
+                "correct": 0, "incorrect": 0, "partial": 0,
+                "total": 0, "accuracy": None,
+            }
 
+        # Subquery: the newest row id per (target_type, target_id, user_id).
+        # Only those rows are counted, so each user contributes at most one
+        # vote per target.
         rows = conn.execute(
-            "SELECT verdict, COUNT(*) as count FROM feedback GROUP BY verdict"
+            """
+            SELECT verdict, COUNT(*) AS count
+            FROM feedback
+            WHERE id IN (
+                SELECT MAX(id) FROM feedback
+                GROUP BY target_type, target_id, user_id
+            )
+            GROUP BY verdict
+            """
         ).fetchall()
     finally:
         conn.close()
@@ -434,9 +490,23 @@ if __name__ == "__main__":
     stats = get_feedback_stats()
     print(f"feedback stats: {stats}")
 
+    # --- Test dedupe: same user, same target, new verdict ---
+    fid2 = save_feedback(
+        target_type="analysis",
+        target_id="test-1",
+        verdict="incorrect",
+        user_id="test-user",
+        notes="Changed my mind",
+    )
+    print(f"second save_feedback returned id: {fid2}")
+
+    stats_after = get_feedback_stats()
+    print(f"feedback stats after second vote: {stats_after}")
+    print("(total should not have increased; verdict should now be incorrect)")
+
     # Cleanup
     conn = _get_connection()
-    conn.execute("DELETE FROM feedback WHERE id = ?", (fid,))
+    conn.execute("DELETE FROM feedback WHERE id IN (?, ?)", (fid, fid2))
     conn.commit()
     conn.close()
 
