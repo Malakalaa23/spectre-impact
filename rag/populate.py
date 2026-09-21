@@ -142,6 +142,7 @@ def build_service_docs() -> tuple[list[str], list[str], list[dict], list[str]]:
         node_type = node.get("type", "unknown")
         owner = node.get("owner", "unknown")
         criticality = node.get("criticality", "unknown")
+        customer_facing = bool(node.get("customer_facing", False))
         children = node.get("children", [])
 
         lines = [
@@ -149,6 +150,7 @@ def build_service_docs() -> tuple[list[str], list[str], list[dict], list[str]]:
             f"Type: {node_type}",
             f"Owner: {owner}",
             f"Criticality: {criticality}",
+            f"Customer-facing: {'yes' if customer_facing else 'no'}",
         ]
         if children:
             lines.append(f"Downstream dependents: {', '.join(children)}")
@@ -170,6 +172,7 @@ def build_service_docs() -> tuple[list[str], list[str], list[dict], list[str]]:
             "node_type": node_type,
             "owner": owner,
             "criticality": criticality,
+            "customer_facing": customer_facing,
             "children": ",".join(children),
         })
         types.append("service")
@@ -193,21 +196,39 @@ def build_business_docs() -> tuple[list[str], list[str], list[dict], list[str]]:
     for service, info in data.items():
         feature = info.get("feature", "unknown feature")
         users_pct = info.get("users_percentage", 0)
+        peak_hours = info.get("peak_hours", "")
+        txn_value = info.get("avg_daily_transaction_value", 0)
 
-        text = (
-            f"Business impact of {service}\n"
-            f"Feature: {feature}\n"
-            f"Users affected: {users_pct}%\n"
+        lines = [
+            f"Business impact of {service}",
+            f"Feature: {feature}",
+            f"Users affected: {users_pct}%",
+        ]
+        if peak_hours:
+            lines.append(f"Peak hours (Africa/Cairo): {peak_hours}")
+        if txn_value:
+            lines.append(
+                f"Average daily transaction value: ${txn_value:,} USD"
+            )
+        lines.append(
             f"Meaning: if {service} is impacted, approximately {users_pct}% "
             f"of users experience degraded or broken functionality in {feature}."
         )
+        if peak_hours and txn_value:
+            lines.append(
+                f"Highest exposure is during {peak_hours}, when approximately "
+                f"${txn_value:,} USD of daily transaction value is at risk."
+            )
 
+        text = "\n".join(lines)
         ids.append(f"biz_{service}")
         texts.append(text)
         metas.append({
             "service": service,
             "feature": feature,
             "users_percentage": users_pct,
+            "peak_hours": peak_hours,
+            "avg_daily_transaction_value": txn_value,
         })
         types.append("business")
 

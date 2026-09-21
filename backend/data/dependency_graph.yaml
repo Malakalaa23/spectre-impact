@@ -1,116 +1,175 @@
+# ============================================================
+# Spectre Impact — Manual Impact Map (MVP)
+#
+# A node represents any component that can be affected by a
+# deployment or infrastructure change.
+#
+# Every node contains:
+#   type            -> What kind of component it is
+#   owner           -> Responsible team
+#   criticality     -> low | medium | high | critical
+#   customer_facing -> true if the customer directly interacts
+#                      with this component. Lya uses this to answer
+#                      "which of these are customer-facing?"
+#   children        -> Components that depend on this node
+#
+# Impact always flows DOWN.
+# ============================================================
+
 nodes:
-  checkout_api:
-    children:
-    - web_frontend
-    - mobile_app
-    criticality: critical
-    owner: payments-team
-    type: api
-  checkout_journey:
-    children:
-    - customer_retention
-    - customer_satisfaction
-    - revenue_generation
-    criticality: critical
-    owner: product-team
-    type: customer_journey
-  checkout_service:
-    children:
-    - checkout_api
-    criticality: critical
-    owner: payments-team
-    type: service
+
+  ############################################################
+  # Infrastructure
+  ############################################################
+
   customer_database:
-    children:
-    - login_service
-    - checkout_service
-    - payment_service
-    - profile_service
-    criticality: critical
-    owner: platform-team
     type: database
-  customer_retention:
-    children: []
-    criticality: high
-    owner: management
-    type: business
-  customer_satisfaction:
-    children: []
-    criticality: medium
-    owner: management
-    type: business
-  login_api:
-    children:
-    - web_frontend
-    - mobile_app
+    owner: backend-team
     criticality: critical
-    owner: identity-team
-    type: api
-  login_journey:
+    customer_facing: false
     children:
-    - customer_retention
-    - customer_satisfaction
-    - revenue_generation
-    criticality: critical
-    owner: product-team
-    type: customer_journey
-  login_service:
-    children:
-    - login_api
-    - checkout_api
-    criticality: critical
-    owner: identity-team
-    type: service
-  mobile_app:
-    children:
-    - login_journey
-    - checkout_journey
-    criticality: high
-    owner: mobile-team
-    type: mobile_app
-  payment_service:
-    children:
-    - checkout_api
-    criticality: critical
-    owner: payments-team
-    type: service
-  profile_api:
-    children:
-    - web_frontend
-    criticality: high
-    owner: identity-team
-    type: api
-  profile_journey:
-    children:
-    - customer_retention
-    - customer_satisfaction
-    - revenue_generation
-    criticality: medium
-    owner: product-team
-    type: customer_journey
-  profile_service:
-    children:
-    - profile_api
-    criticality: high
-    owner: identity-team
-    type: service
+      - login_service
+      - payment_service
+      - profile_service
+
   redis_cache:
-    children:
-    - login_service
-    - profile_service
-    criticality: high
-    owner: platform-team
     type: cache
-  revenue_generation:
-    children: []
-    criticality: critical
-    owner: management
-    type: business
-  web_frontend:
+    owner: backend-team
+    criticality: medium
+    customer_facing: false
     children:
-    - login_journey
-    - checkout_journey
-    - profile_journey
+      - login_service
+
+  ############################################################
+  # Services
+  ############################################################
+
+  login_service:
+    type: service
+    owner: backend-team
     criticality: high
-    owner: frontend-team
+    customer_facing: false
+    children:
+      - login_api
+
+  payment_service:
+    type: service
+    owner: payments-team
+    criticality: critical
+    customer_facing: false
+    children:
+      - checkout_api
+
+  profile_service:
+    type: service
+    owner: backend-team
+    criticality: medium
+    customer_facing: false
+    children:
+      - profile_api
+
+  ############################################################
+  # APIs
+  ############################################################
+
+  login_api:
+    type: api
+    owner: backend-team
+    criticality: high
+    customer_facing: false
+    children:
+      - web_frontend
+      - mobile_app
+
+  checkout_api:
+    type: api
+    owner: payments-team
+    criticality: critical
+    customer_facing: false
+    children:
+      - web_frontend
+      - mobile_app
+
+  profile_api:
+    type: api
+    owner: backend-team
+    criticality: medium
+    customer_facing: false
+    children:
+      - web_frontend
+
+  ############################################################
+  # Applications
+  ############################################################
+
+  web_frontend:
     type: frontend
+    owner: frontend-team
+    criticality: high
+    customer_facing: true
+    children:
+      - login_journey
+      - checkout_journey
+      - profile_journey
+
+  mobile_app:
+    type: mobile_app
+    owner: mobile-team
+    criticality: high
+    customer_facing: true
+    children:
+      - login_journey
+      - checkout_journey
+
+  ############################################################
+  # Customer Journeys
+  ############################################################
+
+  login_journey:
+    type: customer_journey
+    owner: product-team
+    criticality: critical
+    customer_facing: true
+    children:
+      - customer_retention
+
+  checkout_journey:
+    type: customer_journey
+    owner: product-team
+    criticality: critical
+    customer_facing: true
+    children:
+      - revenue_generation
+
+  profile_journey:
+    type: customer_journey
+    owner: product-team
+    criticality: medium
+    customer_facing: true
+    children:
+      - customer_satisfaction
+
+  ############################################################
+  # Business Capabilities
+  ############################################################
+
+  customer_retention:
+    type: business
+    owner: management
+    criticality: high
+    customer_facing: false
+    children: []
+
+  revenue_generation:
+    type: business
+    owner: management
+    criticality: critical
+    customer_facing: false
+    children: []
+
+  customer_satisfaction:
+    type: business
+    owner: management
+    criticality: medium
+    customer_facing: false
+    children: []
