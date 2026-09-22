@@ -14,6 +14,7 @@ Endpoints:
     POST /api/chat                — Lya chat endpoint.
     POST /api/chat/clear          — clear a session's history.
     POST /api/tts                 — text-to-speech (MP3 output).
+    POST /api/stt                 — speech-to-text (Whisper).
     POST /api/feedback            — record user feedback on an AI output.
     GET  /api/feedback/stats      — aggregate feedback counts (accuracy).
 
@@ -21,11 +22,16 @@ Design notes:
     - BFS delegates to backend.analysis.change_analysis_engine.analyze_impact().
     - Chat endpoints use chat.agent + chat.memory + chat.safety.
     - TTS uses ai.tts (Edge TTS, English + Egyptian Arabic).
+    - STT uses ai.stt (faster-whisper, Egyptian Arabic + English).
     - A background task auto-fires synthetic PR events every 30 seconds.
     - user_id is preferred over session_id for cross-session memory; the
       server sets a signed cookie on first contact and reuses it after.
     - Every analyzed PR is added to the RAG knowledge base (learning loop),
       so future queries can cite it as a past incident.
+    - calculate_blast_radius() returns the FULL BFS result, including the
+      evidence path chain and the deterministic severity. Trimming it here
+      would break github_client.py, which reads bfs_result["evidence"] to
+      render the evidence chain in the PR comment.
 """
 
 import sys
@@ -40,7 +46,7 @@ from datetime import datetime, timezone
 from typing import Any
 from collections import deque
 
-from fastapi import BackgroundTasks, FastAPI, Request, HTTPException
+from fastapi import BackgroundTasks, FastAPI, Request, HTTPException, UploadFile, File, Form
 from fastapi.responses import Response
 from starlette.middleware.sessions import SessionMiddleware
 from pydantic import BaseModel, Field
@@ -206,7 +212,7 @@ except ImportError:
     def sanitize_output(text): return text
 
 
-# TTS
+# TTS — Edge TTS, English + Egyptian Arabic
 try:
     from ai.tts import synthesize_async as tts_synthesize
     log("TTS module imported")
@@ -215,6 +221,17 @@ except ImportError as e:
 
     async def tts_synthesize(text, language="auto", voice=None):
         raise RuntimeError("TTS module not available")
+
+
+# STT — faster-whisper, Egyptian Arabic + English
+try:
+    from ai.stt import transcribe_async as stt_transcribe
+    log("STT module imported")
+except ImportError as e:
+    log(f"STT module import failed: {e}")
+
+    async def stt_transcribe(audio_bytes, language=None):
+        raise RuntimeError("STT module not available")
 
 
 # -------------------------------------------------------------------
@@ -280,11 +297,30 @@ LANDING_PRESETS: dict[str, dict[str, Any]] = {
 # Blast radius
 # -------------------------------------------------------------------
 def calculate_blast_radius(changed_files: list[str]) -> dict[str, Any]:
+    """
+    Run the BFS engine and return the full analysis.
+
+    The BFS engine returns far more than we use directly:
+        - evidence: the BFS path to every affected node
+        - severity / confidence / deployment_strategy / rollback_required
+        - affected_* categorized lists (services, apis, frontends, etc.)
+
+    All of that flows through to the PR comment formatter and the DB.
+    Trimming it down here would lose information that downstream
+    consumers need — specifically, github_client.py reads
+    bfs_result["evidence"] to render the evidence chain in the PR
+    comment, and bfs_result["severity"] is the deterministic severity
+    that should override the AI's guess when available.
+
+    Nothing downstream is required to use every field. Passing them
+    through is free; dropping them is a bug.
+    """
     if not changed_files:
         return {
             "changed_resource": "unknown",
             "affected_services": ["unknown_service"],
             "business_impact": 0,
+            "evidence": [],
         }
 
     try:
@@ -295,14 +331,18 @@ def calculate_blast_radius(changed_files: list[str]) -> dict[str, Any]:
             "changed_resource": "unknown",
             "affected_services": ["unknown_service"],
             "business_impact": 0,
+            "evidence": [],
         }
 
-    affected = result.get("affected_services") or ["unknown_service"]
-    return {
-        "changed_resource": result.get("changed_resource", "unknown"),
-        "affected_services": affected,
-        "business_impact": result.get("business_impact", 0),
-    }
+    # Ensure the fields downstream consumers expect are present. The BFS
+    # engine should already provide these; the fallbacks are for when a
+    # path through the engine doesn't set them.
+    result.setdefault("changed_resource", "unknown")
+    result.setdefault("affected_services", ["unknown_service"])
+    result.setdefault("business_impact", 0)
+    result.setdefault("evidence", [])
+
+    return result
 
 
 # -------------------------------------------------------------------
@@ -701,6 +741,62 @@ async def tts_endpoint(req: TTSRequest):
 
 
 # -------------------------------------------------------------------
+# Speech-to-text
+# -------------------------------------------------------------------
+@app.post("/api/stt")
+async def stt_endpoint(
+    audio: UploadFile = File(...),
+    session_id: str = Form(""),
+):
+    """
+    Transcribe uploaded audio to text.
+
+    The frontend (Streamlit's st.audio_input) sends a webm/mp3/wav blob
+    as multipart form data under the field name "audio".
+
+    Returns:
+        {"text": "...", "session_id": "...", "language": "ar" | "en"}
+    """
+    log(f"/api/stt session={session_id or '(none)'}")
+
+    try:
+        audio_bytes = await audio.read()
+    except Exception as exc:
+        log(f"Failed to read uploaded audio: {exc}")
+        raise HTTPException(status_code=400, detail="Could not read audio file") from exc
+
+    if not audio_bytes:
+        raise HTTPException(status_code=400, detail="Empty audio file")
+
+    # Cap at 10 MB. A minute of webm audio is roughly 500 KB, so this
+    # is generous. Prevents memory blowups from runaway uploads.
+    if len(audio_bytes) > 10 * 1024 * 1024:
+        raise HTTPException(status_code=413, detail="Audio too large (max 10 MB)")
+
+    try:
+        text = await stt_transcribe(audio_bytes, language=None)
+    except RuntimeError as exc:
+        log(f"STT unavailable: {exc}")
+        raise HTTPException(status_code=503, detail="Speech-to-text is not available") from exc
+    except Exception as exc:
+        log(f"STT failed: {exc}\n{traceback.format_exc()}")
+        raise HTTPException(status_code=500, detail="Transcription failed") from exc
+
+    # Detect the language of the transcript for the frontend. Arabic
+    # characters in the output mean the user spoke Arabic.
+    has_arabic = any("\u0600" <= c <= "\u06ff" for c in text)
+    language = "ar" if has_arabic else "en"
+
+    log(f"/api/stt transcribed {len(audio_bytes)} bytes -> {len(text)} chars")
+
+    return {
+        "text": text,
+        "session_id": session_id,
+        "language": language,
+    }
+
+
+# -------------------------------------------------------------------
 # GitHub helpers
 # -------------------------------------------------------------------
 def parse_payload(payload: dict):
@@ -759,7 +855,9 @@ def run_analysis_pipeline(pr_number: int, repo_name: str, action: str) -> None:
 
     try:
         blast = calculate_blast_radius(changed_files)
-        log(f"Blast radius: {blast}")
+        log(f"Blast radius: {blast.get('changed_resource')} -> "
+            f"{len(blast.get('affected_services', []))} services, "
+            f"{len(blast.get('evidence', []))} evidence paths")
         _push_live_event(
             f"Real PR #{pr_number} analyzed - {len(blast.get('affected_services', []))} services affected",
             kind="pr",
@@ -802,6 +900,16 @@ def run_analysis_pipeline(pr_number: int, repo_name: str, action: str) -> None:
             "validation": ["Check health endpoints"],
             "tokens_used": {},
         }
+
+    # Prefer the deterministic BFS severity over the AI's guess. The BFS
+    # returns uppercase ("CRITICAL"); github_client.py expects the
+    # capitalized form ("Critical"). Normalize, then overwrite the AI
+    # severity only when BFS produced a valid value.
+    bfs_severity = (blast.get("severity") or "").strip().capitalize()
+    if bfs_severity in ("Critical", "High", "Medium", "Low"):
+        if insights.get("severity") != bfs_severity:
+            log(f"Overriding AI severity ({insights.get('severity')}) with BFS severity ({bfs_severity})")
+        insights["severity"] = bfs_severity
 
     try:
         save_analysis(pr_number, repo_name, blast, insights)
@@ -854,7 +962,8 @@ def run_commit_analysis(repo_name: str, commit_sha: str, branch: str, changed_fi
 
     try:
         blast = calculate_blast_radius(changed_files)
-        log(f"Blast radius: {blast}")
+        log(f"Blast radius: {blast.get('changed_resource')} -> "
+            f"{len(blast.get('affected_services', []))} services affected")
         _push_live_event(
             f"Real commit {commit_sha[:7]} analyzed - {len(blast.get('affected_services', []))} services affected",
             kind="commit",
@@ -917,6 +1026,12 @@ def run_commit_analysis(repo_name: str, commit_sha: str, branch: str, changed_fi
         if pr_number:
             log(f"Found PR #{pr_number} for this branch")
             insights = generate_insights(blast["affected_services"], blast["business_impact"])
+
+            # Same severity normalization as the PR pipeline.
+            bfs_severity = (blast.get("severity") or "").strip().capitalize()
+            if bfs_severity in ("Critical", "High", "Medium", "Low"):
+                insights["severity"] = bfs_severity
+
             post_github_comment(pr_number, repo_name, blast, insights, code_review)
             log(f"Posted PR comment on #{pr_number}")
         else:
