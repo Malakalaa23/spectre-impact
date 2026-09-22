@@ -70,10 +70,11 @@ edge-tts>=6.1.0
 
 # ---------------------------------------------------------------------------
 # Speech-to-text (faster-whisper, Egyptian Arabic + English)
+# Pydub removed -- faster-whisper uses PyAV internally, which ships
+# its own libav. No system ffmpeg is required.
 # ---------------------------------------------------------------------------
 faster-whisper>=1.2.0
 ctranslate2>=4.0
-pydub>=0.25.1
 soundfile>=0.12.0
 av>=11.0.0
 onnxruntime>=1.14

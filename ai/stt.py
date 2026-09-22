@@ -11,6 +11,12 @@ Why faster-whisper over openai-whisper:
     - Same accuracy
     - Runs offline after the first model download
 
+Audio decoding:
+    faster-whisper uses PyAV internally, which ships its own libav
+    bindings. No system ffmpeg is required. We pass the raw bytes
+    straight to transcribe() and PyAV handles webm, mp3, ogg, wav,
+    and everything else the browser records.
+
 Model:
     Mano200600/faster-whisper-small-egyptian-ar
     Fine-tuned on Egyptian Arabic speech. Handles English code-switching
@@ -27,7 +33,6 @@ import asyncio
 import logging
 import os
 import tempfile
-from pathlib import Path
 from typing import Optional
 
 logger = logging.getLogger(__name__)
@@ -42,9 +47,6 @@ MODEL_ID = os.getenv(
 )
 DEVICE = os.getenv("SPECTRE_STT_DEVICE", "cpu")
 COMPUTE_TYPE = os.getenv("SPECTRE_STT_COMPUTE", "int8")  # int8 is best for CPU
-
-# Whisper models expect 16 kHz mono audio. The frontend sends whatever
-# the browser records (usually 48 kHz stereo webm). We normalize here.
 
 
 # ---------------------------------------------------------------------------
@@ -93,42 +95,32 @@ def _get_model():
 
 
 # ---------------------------------------------------------------------------
-# Audio normalization
-# ---------------------------------------------------------------------------
-def _normalize_audio_to_wav(input_bytes: bytes, input_suffix: str) -> str:
-    """
-    Convert arbitrary audio bytes to 16 kHz mono WAV on disk.
-
-    Whisper expects this format. Browser recordings are typically webm
-    or opus. pydub + ffmpeg handles the conversion.
-
-    Returns the path to the WAV file. Caller is responsible for cleanup.
-    """
-    from pydub import AudioSegment
-
-    # Write the raw bytes to a temp file first
-    with tempfile.NamedTemporaryFile(suffix=input_suffix, delete=False) as f:
-        f.write(input_bytes)
-        input_path = f.name
-
-    try:
-        audio = AudioSegment.from_file(input_path)
-        audio = audio.set_frame_rate(16000).set_channels(1)
-
-        output_path = input_path + ".wav"
-        audio.export(output_path, format="wav")
-        return output_path
-    finally:
-        # The original temp file is no longer needed
-        try:
-            os.unlink(input_path)
-        except OSError:
-            pass
-
-
-# ---------------------------------------------------------------------------
 # Transcription
 # ---------------------------------------------------------------------------
+def _detect_suffix(audio_bytes: bytes) -> str:
+    """
+    Guess the audio container from the file's magic bytes.
+
+    faster-whisper (via PyAV) will decode the format on its own, but
+    giving it a file with the right extension avoids ambiguity when the
+    bytes could be misdetected.
+
+    Browsers send webm/opus by default for MediaRecorder, wav for
+    st.audio_input on some builds, mp3/m4a for uploads.
+    """
+    if audio_bytes[:4] == b"RIFF":
+        return ".wav"
+    if audio_bytes[:4] == b"OggS":
+        return ".ogg"
+    if audio_bytes[:4] == b"\x1a\x45\xdf\xa3":
+        return ".webm"
+    if audio_bytes[:3] == b"ID3" or audio_bytes[:2] == b"\xff\xfb":
+        return ".mp3"
+    if audio_bytes[4:8] == b"ftyp":
+        return ".m4a"
+    return ".webm"
+
+
 def _transcribe_sync(audio_bytes: bytes, language: Optional[str] = None) -> str:
     """
     Synchronous transcription. Callers wrap this in asyncio.to_thread.
@@ -137,25 +129,20 @@ def _transcribe_sync(audio_bytes: bytes, language: Optional[str] = None) -> str:
     if model is None:
         raise RuntimeError("STT model unavailable")
 
-    # Detect the input format from common magic bytes
-    suffix = ".webm"
-    if audio_bytes[:4] == b"RIFF":
-        suffix = ".wav"
-    elif audio_bytes[:3] == b"ID3" or audio_bytes[:2] == b"\xff\xfb":
-        suffix = ".mp3"
-    elif audio_bytes[:4] == b"OggS":
-        suffix = ".ogg"
-    elif audio_bytes[:4] == b"\x1a\x45\xdf\xa3":
-        suffix = ".webm"
+    suffix = _detect_suffix(audio_bytes)
 
-    wav_path = _normalize_audio_to_wav(audio_bytes, suffix)
+    # faster-whisper accepts either a path or a file-like object. We
+    # use a NamedTemporaryFile so PyAV can seek if it needs to.
+    with tempfile.NamedTemporaryFile(suffix=suffix, delete=False) as f:
+        f.write(audio_bytes)
+        temp_path = f.name
 
     try:
         # language=None lets Whisper auto-detect. For mixed Arabic/English
         # it usually picks the dominant language, which is fine because
         # the model was fine-tuned on code-switching.
         segments, info = model.transcribe(
-            wav_path,
+            temp_path,
             language=language,
             beam_size=5,
             vad_filter=True,            # skip silence — faster and cleaner
@@ -169,7 +156,7 @@ def _transcribe_sync(audio_bytes: bytes, language: Optional[str] = None) -> str:
 
     finally:
         try:
-            os.unlink(wav_path)
+            os.unlink(temp_path)
         except OSError:
             pass
 
@@ -185,7 +172,7 @@ async def transcribe_async(
     Transcribe audio bytes to text.
 
     Args:
-        audio_bytes: Raw audio file contents (webm, wav, mp3, ogg).
+        audio_bytes: Raw audio file contents (webm, wav, mp3, ogg, m4a).
         language: Optional ISO code ("ar", "en"). None = auto-detect.
 
     Returns:
