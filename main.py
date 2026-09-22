@@ -32,6 +32,9 @@ Design notes:
       evidence path chain and the deterministic severity. Trimming it here
       would break github_client.py, which reads bfs_result["evidence"] to
       render the evidence chain in the PR comment.
+    - Heavy models (STT + RAG embeddings) are pre-loaded at startup so the
+      first user request is fast. Without this, the first /api/stt call
+      exceeds the client timeout in Merna's Streamlit UI.
 """
 
 import sys
@@ -424,6 +427,38 @@ async def _start_live_demo_stream() -> None:
     global _live_feed_task
     if _live_feed_task is None or _live_feed_task.done():
         _live_feed_task = asyncio.create_task(_run_live_demo_stream(interval_seconds=30))
+
+
+@app.on_event("startup")
+async def _preload_heavy_models() -> None:
+    """
+    Pre-load the STT model and the RAG embedding model at startup.
+
+    Without this, the first user request to /api/stt or a RAG query
+    pays the full model-load cost (30-90 seconds locally, minutes on
+    a cold container), which exceeds the client-side timeout in
+    Merna's Streamlit UI. Loading them once at boot moves the cost
+    to container startup where judges never see it.
+
+    Failures are logged and swallowed — a model that fails to load
+    should not prevent the rest of the app from starting. The lazy
+    loaders in ai.stt and rag.vector_store will retry on first use.
+    """
+    # Pre-load STT
+    try:
+        from ai.stt import _get_model as _stt_get_model
+        await asyncio.to_thread(_stt_get_model)
+        log("STT model pre-loaded")
+    except Exception as exc:
+        log(f"STT pre-load failed (will load on first use): {exc}")
+
+    # Pre-load RAG embeddings
+    try:
+        from rag.vector_store import _get_model as _embed_get_model
+        await asyncio.to_thread(_embed_get_model)
+        log("Embedding model pre-loaded")
+    except Exception as exc:
+        log(f"Embedding pre-load failed (will load on first use): {exc}")
 
 
 @app.on_event("shutdown")
