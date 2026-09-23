@@ -29,22 +29,34 @@ Design notes:
     - Every analyzed PR is added to the RAG knowledge base (learning loop),
       so future queries can cite it as a past incident.
     - calculate_blast_radius() returns the FULL BFS result, including the
-      evidence path chain and the deterministic severity. Trimming it here
-      would break github_client.py, which reads bfs_result["evidence"] to
-      render the evidence chain in the PR comment.
-    - Heavy models (STT + RAG embeddings) are pre-loaded at startup so the
-      first user request is fast. Without this, the first /api/stt call
-      exceeds the client timeout in Merna's Streamlit UI.
+      evidence path chain and the deterministic severity.
+    - Heavy models (STT, embeddings) AND the ChromaDB collection are
+      pre-loaded at startup so the first user request is fast.
+    - HuggingFace Hub is forced offline BEFORE any model library is
+      imported, otherwise sentence-transformers/transformers will try to
+      reach huggingface.co on first use.
 """
 
-import sys
+# ---------------------------------------------------------------------------
+# CRITICAL: force HuggingFace Hub offline BEFORE any model library is
+# imported. This must run before `from sentence_transformers import ...`,
+# `from transformers import ...`, or anything that touches huggingface_hub.
+# ---------------------------------------------------------------------------
 import os
+
+os.environ.setdefault("HF_HUB_OFFLINE", "1")
+os.environ.setdefault("TRANSFORMERS_OFFLINE", "1")
+os.environ.setdefault("HF_HUB_DISABLE_TELEMETRY", "1")
+os.environ.setdefault("HF_HUB_DISABLE_SYMLINKS_WARNING", "1")
+
+import sys
 import json
 import yaml
 import uuid
 import hashlib
 import asyncio
 import traceback
+import re
 from datetime import datetime, timezone
 from typing import Any
 from collections import deque
@@ -56,7 +68,6 @@ from pydantic import BaseModel, Field
 from dotenv import load_dotenv
 from github import Github, GithubException, Auth
 
-# Force UTF-8 on Windows
 try:
     sys.stdout.reconfigure(encoding="utf-8")
 except Exception:
@@ -86,12 +97,11 @@ def log(msg: str) -> None:
 # -------------------------------------------------------------------
 app = FastAPI(title="Spectre Impact")
 
-# Signed cookie session (for stable user_id across requests).
 SESSION_SECRET = os.getenv("SESSION_SECRET", "spectre-impact-dev-secret-change-me")
 app.add_middleware(
     SessionMiddleware,
     secret_key=SESSION_SECRET,
-    max_age=60 * 60 * 24 * 30,  # 30 days
+    max_age=60 * 60 * 24 * 30,
 )
 
 GITHUB_TOKEN = os.getenv("GITHUB_TOKEN")
@@ -185,7 +195,7 @@ except ImportError as e:
     def get_cache_key_for_diff(diff): return hashlib.md5(diff.encode()).hexdigest()
 
 
-# Lya chat agent — new signature accepts user_id
+# Lya chat agent
 try:
     from chat.agent import chat as lya_chat
     from chat.memory import (
@@ -215,7 +225,7 @@ except ImportError:
     def sanitize_output(text): return text
 
 
-# TTS — Edge TTS, English + Egyptian Arabic
+# TTS
 try:
     from ai.tts import synthesize_async as tts_synthesize
     log("TTS module imported")
@@ -226,7 +236,7 @@ except ImportError as e:
         raise RuntimeError("TTS module not available")
 
 
-# STT — faster-whisper, Egyptian Arabic + English
+# STT
 try:
     from ai.stt import transcribe_async as stt_transcribe
     log("STT module imported")
@@ -303,20 +313,13 @@ def calculate_blast_radius(changed_files: list[str]) -> dict[str, Any]:
     """
     Run the BFS engine and return the full analysis.
 
-    The BFS engine returns far more than we use directly:
-        - evidence: the BFS path to every affected node
-        - severity / confidence / deployment_strategy / rollback_required
-        - affected_* categorized lists (services, apis, frontends, etc.)
-
-    All of that flows through to the PR comment formatter and the DB.
-    Trimming it down here would lose information that downstream
-    consumers need — specifically, github_client.py reads
-    bfs_result["evidence"] to render the evidence chain in the PR
-    comment, and bfs_result["severity"] is the deterministic severity
-    that should override the AI's guess when available.
-
-    Nothing downstream is required to use every field. Passing them
-    through is free; dropping them is a bug.
+    Downstream consumers rely on the full dict, not just the three
+    fields we display in the UI:
+        - evidence           — rendered as the evidence chain in the PR comment
+        - severity           — deterministic severity, overrides the AI's guess
+        - deployment_strategy, rollback_required, confidence
+        - affected_apis, affected_frontends, affected_customer_journeys,
+          affected_business_capabilities
     """
     if not changed_files:
         return {
@@ -337,9 +340,6 @@ def calculate_blast_radius(changed_files: list[str]) -> dict[str, Any]:
             "evidence": [],
         }
 
-    # Ensure the fields downstream consumers expect are present. The BFS
-    # engine should already provide these; the fallbacks are for when a
-    # path through the engine doesn't set them.
     result.setdefault("changed_resource", "unknown")
     result.setdefault("affected_services", ["unknown_service"])
     result.setdefault("business_impact", 0)
@@ -432,33 +432,55 @@ async def _start_live_demo_stream() -> None:
 @app.on_event("startup")
 async def _preload_heavy_models() -> None:
     """
-    Pre-load the STT model and the RAG embedding model at startup.
+    Pre-load AND warm every heavy model at startup.
 
-    Without this, the first user request to /api/stt or a RAG query
-    pays the full model-load cost (30-90 seconds locally, minutes on
-    a cold container), which exceeds the client-side timeout in
-    Merna's Streamlit UI. Loading them once at boot moves the cost
-    to container startup where judges never see it.
+    Why this matters:
+        - Loading the STT weights is only half the cost. The first real
+          inference on a cold process also pays for CTranslate2 JIT
+          compiling its CPU kernels and the Silero VAD model loading.
+          Combined that's 60-90 seconds. We warm up with a silent clip.
+
+        - The embedding model has the same problem: loading the weights
+          is fast, but the first `encode()` call triggers sentence-
+          transformers' JIT compilation of its CPU kernels. That's
+          15-20 seconds on a cold process, all paid by the first user
+          query. We run a dummy encode at boot to warm it.
+
+        - The persistent ChromaDB client is the entire remaining cold-
+          start cost for RAG. Opening it at boot means the first chat
+          message that calls search_knowledge_base is instant.
 
     Failures are logged and swallowed — a model that fails to load
-    should not prevent the rest of the app from starting. The lazy
-    loaders in ai.stt and rag.vector_store will retry on first use.
+    should not prevent the rest of the app from starting.
     """
-    # Pre-load STT
+    # Pre-load STT, then warm it up.
     try:
-        from ai.stt import _get_model as _stt_get_model
+        from ai.stt import _get_model as _stt_get_model, warmup as _stt_warmup
         await asyncio.to_thread(_stt_get_model)
         log("STT model pre-loaded")
+        await _stt_warmup()
     except Exception as exc:
         log(f"STT pre-load failed (will load on first use): {exc}")
 
-    # Pre-load RAG embeddings
+    # Pre-load RAG embeddings, warm the encoder, and open the ChromaDB
+    # collection. The encode() call is what triggers the JIT compilation,
+    # so it must actually run once before the first user query.
     try:
-        from rag.vector_store import _get_model as _embed_get_model
+        from rag.vector_store import (
+            _get_model as _embed_get_model,
+            get_embedding as _embed_encode,
+            get_collection,
+        )
         await asyncio.to_thread(_embed_get_model)
         log("Embedding model pre-loaded")
+
+        await asyncio.to_thread(_embed_encode, "warmup query")
+        log("Embedding encoder warmed")
+
+        await asyncio.to_thread(get_collection)
+        log("ChromaDB collection pre-opened")
     except Exception as exc:
-        log(f"Embedding pre-load failed (will load on first use): {exc}")
+        log(f"RAG pre-load failed (will load on first use): {exc}")
 
 
 @app.on_event("shutdown")
@@ -485,19 +507,6 @@ class ChatResponse(BaseModel):
 
 
 class FeedbackRequest(BaseModel):
-    """
-    User feedback on an AI-generated output.
-
-    The verdict drives the learning loop: every "correct" is a positive
-    signal, every "incorrect" a negative one. Notes are optional, capped
-    at 1000 chars to keep the table small.
-
-    target_type must be one of the four outputs we produce:
-        analysis       — the blast radius + business impact summary
-        insight        — the AI severity / simulation / rollback text
-        code_review    — the code quality verdict
-        chat_response  — a Lya reply
-    """
     target_type: str = Field(..., pattern="^(analysis|insight|code_review|chat_response)$")
     target_id: str = Field(..., min_length=1, max_length=128)
     verdict: str = Field(..., pattern="^(correct|incorrect|partial)$")
@@ -506,7 +515,7 @@ class FeedbackRequest(BaseModel):
 
 
 class TTSRequest(BaseModel):
-    text: str = Field(..., min_length=1, max_length=2000)
+    text: str = Field(..., min_length=1, max_length=8000)
     language: str = Field("auto", pattern="^(auto|ar|en)$")
     voice: str | None = None
 
@@ -529,7 +538,6 @@ def health_memory():
 # -------------------------------------------------------------------
 @app.get("/api/landing/presets")
 def landing_presets() -> dict[str, Any]:
-    """Return bilingual landing page content for the frontend."""
     return {
         "available_languages": list(LANDING_PRESETS.keys()),
         "default": "en",
@@ -547,26 +555,6 @@ def chat_deep_link(
     pr: int | None = None,
     lang: str = "en",
 ) -> dict[str, Any]:
-    """
-    Deep-link endpoint for chat.
-
-    When someone clicks "Ask Lya about this change" from a PR comment, they
-    land here. The frontend pre-fills the chat input with `q` and uses the
-    returned session_id + user_id to continue the conversation.
-
-    Query params:
-        q     — the pre-filled question (URL-encoded)
-        pr    — optional PR number for context
-        lang  — "en" or "ar" (default "en")
-
-    Returns:
-        session_id         — stable session for this browser tab
-        user_id            — stable user ID across sessions
-        prefilled_question — the q param, echoed back
-        pr_number          — the pr param, echoed back
-        language           — the lang param
-        presets            — landing preset for that language
-    """
     session_id = request.session.get("spectre_session_id")
     if not session_id:
         session_id = str(uuid.uuid4())
@@ -577,7 +565,6 @@ def chat_deep_link(
         user_id = str(uuid.uuid4())
         request.session["spectre_user_id"] = user_id
 
-    # If lang is unknown, fall back to English
     if lang not in LANDING_PRESETS:
         lang = "en"
 
@@ -611,20 +598,8 @@ def live_feed(limit: int = 20) -> dict[str, Any]:
 # -------------------------------------------------------------------
 @app.post("/api/chat", response_model=ChatResponse)
 async def chat_endpoint(req: ChatRequest, request: Request) -> ChatResponse:
-    """
-    Send a message to Lya and get a response.
-
-    user_id resolution order:
-        1. From the request body (explicit).
-        2. From the signed cookie session.
-        3. Generate a new one and store it in the session.
-
-    The resolved user_id is returned in the response so the frontend can
-    persist it if it wants to control identity across devices.
-    """
     log(f"/api/chat session={req.session_id} user={req.user_id or '(cookie)'} len={len(req.message)}")
 
-    # Resolve user_id
     user_id = req.user_id
     if not user_id:
         user_id = request.session.get("spectre_user_id")
@@ -632,17 +607,14 @@ async def chat_endpoint(req: ChatRequest, request: Request) -> ChatResponse:
         user_id = str(uuid.uuid4())
     request.session["spectre_user_id"] = user_id
 
-    # Sanitize input
     try:
         clean_message = sanitize_input(req.message)
     except ValueError as exc:
         log(f"Blocked input in {req.session_id}: {exc}")
         raise HTTPException(status_code=400, detail="Invalid input.") from exc
 
-    # Load history for the session
     history = get_history(req.session_id)
 
-    # Call the agent (new signature: message, session_id, user_id, history)
     try:
         result = await lya_chat(
             clean_message,
@@ -654,7 +626,6 @@ async def chat_endpoint(req: ChatRequest, request: Request) -> ChatResponse:
         log(f"Chat failed: {exc}\n{traceback.format_exc()}")
         raise HTTPException(status_code=500, detail="Chat failed.") from exc
 
-    # Persist
     save_message(req.session_id, "user", clean_message)
     save_message(req.session_id, "assistant", result.get("response", ""))
 
@@ -670,27 +641,16 @@ async def chat_endpoint(req: ChatRequest, request: Request) -> ChatResponse:
 
 @app.post("/api/chat/clear")
 async def chat_clear(session_id: str) -> dict[str, Any]:
-    """Clear a session's conversation history. Does not clear user memory."""
     clear_session(session_id)
     log(f"Cleared session {session_id}")
     return {"status": "cleared", "session_id": session_id}
 
 
 # -------------------------------------------------------------------
-# Feedback (AI learning loop)
+# Feedback
 # -------------------------------------------------------------------
 @app.post("/api/feedback")
 async def submit_feedback(req: FeedbackRequest, request: Request) -> dict[str, Any]:
-    """
-    Record feedback on an AI-generated output.
-
-    user_id resolution is the same as /api/chat: body, then cookie, then
-    a fresh UUID stored on the session.
-
-    Returns the new row's id plus the current aggregate stats, so the
-    frontend can show "thanks, accuracy is now X%" without a second call.
-    """
-    # Resolve user_id
     user_id = req.user_id
     if not user_id:
         user_id = request.session.get("spectre_user_id")
@@ -698,7 +658,6 @@ async def submit_feedback(req: FeedbackRequest, request: Request) -> dict[str, A
         user_id = str(uuid.uuid4())
     request.session["spectre_user_id"] = user_id
 
-    # Cap the notes string at the Pydantic limit; strip trailing whitespace
     notes = (req.notes or "").strip() or None
 
     try:
@@ -710,7 +669,6 @@ async def submit_feedback(req: FeedbackRequest, request: Request) -> dict[str, A
             notes=notes,
         )
     except ValueError as exc:
-        # Pydantic pattern should catch this first, but defense in depth
         log(f"Feedback rejected: {exc}")
         raise HTTPException(status_code=400, detail=str(exc)) from exc
 
@@ -729,18 +687,11 @@ async def submit_feedback(req: FeedbackRequest, request: Request) -> dict[str, A
 
 @app.get("/api/feedback/stats")
 def feedback_stats() -> dict[str, Any]:
-    """Return aggregate feedback counts and current accuracy."""
     return get_feedback_stats()
 
 
 @app.get("/api/feedback/recent")
 def feedback_recent(limit: int = 20) -> dict[str, Any]:
-    """
-    Return the most recent feedback entries.
-
-    Bounded to 100 to keep responses small. Used by the dashboard for
-    the "the AI learned this" demo panel.
-    """
     limit = max(1, min(limit, 100))
     return {"count": limit, "entries": get_feedback(limit)}
 
@@ -752,9 +703,26 @@ def feedback_recent(limit: int = 20) -> dict[str, Any]:
 async def tts_endpoint(req: TTSRequest):
     log(f"/api/tts lang={req.language} chars={len(req.text)}")
 
+    # Strip markdown and table markup before synthesis. Edge TTS reads
+    # asterisks, backticks, pipes, and hashes literally.
+    clean_text = req.text
+    clean_text = re.sub(r"\*\*(.+?)\*\*", r"\1", clean_text)
+    clean_text = re.sub(r"\*(.+?)\*", r"\1", clean_text)
+    clean_text = re.sub(r"`([^`]+)`", r"\1", clean_text)
+    clean_text = re.sub(r"^#{1,6}\s+", "", clean_text, flags=re.M)
+    clean_text = re.sub(r"^\s*\|.*\|\s*$", "", clean_text, flags=re.M)
+    clean_text = re.sub(r"^\s*[-*]\s+", "", clean_text, flags=re.M)
+    clean_text = re.sub(r"\n{2,}", ". ", clean_text)
+    clean_text = re.sub(r"\s+", " ", clean_text).strip()
+
+    if not clean_text:
+        raise HTTPException(status_code=400, detail="Nothing to speak")
+
+    log(f"/api/tts cleaned {len(req.text)} -> {len(clean_text)} chars")
+
     try:
         audio_bytes = await tts_synthesize(
-            req.text,
+            clean_text,
             language=req.language,
             voice=req.voice,
         )
@@ -783,15 +751,6 @@ async def stt_endpoint(
     audio: UploadFile = File(...),
     session_id: str = Form(""),
 ):
-    """
-    Transcribe uploaded audio to text.
-
-    The frontend (Streamlit's st.audio_input) sends a webm/mp3/wav blob
-    as multipart form data under the field name "audio".
-
-    Returns:
-        {"text": "...", "session_id": "...", "language": "ar" | "en"}
-    """
     log(f"/api/stt session={session_id or '(none)'}")
 
     try:
@@ -803,8 +762,6 @@ async def stt_endpoint(
     if not audio_bytes:
         raise HTTPException(status_code=400, detail="Empty audio file")
 
-    # Cap at 10 MB. A minute of webm audio is roughly 500 KB, so this
-    # is generous. Prevents memory blowups from runaway uploads.
     if len(audio_bytes) > 10 * 1024 * 1024:
         raise HTTPException(status_code=413, detail="Audio too large (max 10 MB)")
 
@@ -817,8 +774,6 @@ async def stt_endpoint(
         log(f"STT failed: {exc}\n{traceback.format_exc()}")
         raise HTTPException(status_code=500, detail="Transcription failed") from exc
 
-    # Detect the language of the transcript for the frontend. Arabic
-    # characters in the output mean the user spoke Arabic.
     has_arabic = any("\u0600" <= c <= "\u06ff" for c in text)
     language = "ar" if has_arabic else "en"
 
@@ -936,10 +891,6 @@ def run_analysis_pipeline(pr_number: int, repo_name: str, action: str) -> None:
             "tokens_used": {},
         }
 
-    # Prefer the deterministic BFS severity over the AI's guess. The BFS
-    # returns uppercase ("CRITICAL"); github_client.py expects the
-    # capitalized form ("Critical"). Normalize, then overwrite the AI
-    # severity only when BFS produced a valid value.
     bfs_severity = (blast.get("severity") or "").strip().capitalize()
     if bfs_severity in ("Critical", "High", "Medium", "Low"):
         if insights.get("severity") != bfs_severity:
@@ -958,11 +909,6 @@ def run_analysis_pipeline(pr_number: int, repo_name: str, action: str) -> None:
     except Exception as e:
         log(f"GitHub comment failed: {e}\n{traceback.format_exc()}")
 
-    # Learning loop: add this analysis to the RAG knowledge base so future
-    # queries can cite it as a past incident. Runs after the GitHub comment
-    # so that a comment failure doesn't block the knowledge base growth, and
-    # vice versa. Any failure here is logged and swallowed — RAG growth must
-    # never break the main pipeline.
     try:
         from rag.populate import add_single_document
 
@@ -1062,7 +1008,6 @@ def run_commit_analysis(repo_name: str, commit_sha: str, branch: str, changed_fi
             log(f"Found PR #{pr_number} for this branch")
             insights = generate_insights(blast["affected_services"], blast["business_impact"])
 
-            # Same severity normalization as the PR pipeline.
             bfs_severity = (blast.get("severity") or "").strip().capitalize()
             if bfs_severity in ("Critical", "High", "Medium", "Low"):
                 insights["severity"] = bfs_severity

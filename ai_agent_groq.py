@@ -1,5 +1,5 @@
-"""
-AI Agent for Spectre Impact – Uses Multiple AI Models + RAG for Code Review.
+﻿"""
+AI Agent for Spectre Impact â€“ Uses Multiple AI Models + RAG for Code Review.
 Ensemble system cross-validates outputs for higher accuracy.
 """
 
@@ -22,7 +22,7 @@ GROQ_API_KEY = os.getenv("GROQ_API_KEY")
 MODELS = [
     "openai/gpt-oss-120b",              # Primary - most reliable for JSON
     "openai/gpt-oss-20b",               # Validator 1 - smaller, faster
-    "qwen/qwen3.6-27b",                 # Validator 2 - good quality
+    "qwen/qwen3.8-27b",                 # Validator 2 - good quality
 ]
 
 MAX_RETRIES = 2
@@ -41,7 +41,7 @@ def _fallback_insights(services: List[str], impact: int) -> Dict[str, Any]:
     """Deterministic fallback when AI is unavailable."""
     severity = "High" if impact > 70 else "Medium" if impact > 30 else "Low"
     return {
-        "simulation": f"⚠️ [AI Offline] Manual review needed for {', '.join(services) if services else 'unknown_service'}.",
+        "simulation": f"âš ï¸ [AI Offline] Manual review needed for {', '.join(services) if services else 'unknown_service'}.",
         "severity": severity,
         "rollback": [
             "git revert HEAD --no-edit",
@@ -103,7 +103,7 @@ def extract_json(text: str) -> Dict[str, Any]:
 
 
 # -------------------------------------------------------------------
-# RAG System – Business Context Retrieval
+# RAG System â€“ Business Context Retrieval
 # -------------------------------------------------------------------
 
 class RAGSystem:
@@ -120,9 +120,9 @@ class RAGSystem:
         try:
             with open(knowledge_file, 'r', encoding='utf-8') as f:
                 self.business_knowledge = json.load(f)
-            logger.info(f"✅ Loaded business knowledge from {knowledge_file}")
+            logger.info(f"âœ… Loaded business knowledge from {knowledge_file}")
         except Exception as e:
-            logger.warning(f"⚠️ Failed to load knowledge file: {e}")
+            logger.warning(f"âš ï¸ Failed to load knowledge file: {e}")
             self._load_default_knowledge()
     
     def _load_default_knowledge(self):
@@ -173,7 +173,7 @@ class RAGSystem:
                 "sla": "99.9% uptime required",
             }
         }
-        logger.info("✅ Loaded default business knowledge")
+        logger.info("âœ… Loaded default business knowledge")
     
     def retrieve_context(self, services: List[str]) -> str:
         if not services:
@@ -198,7 +198,7 @@ class RAGSystem:
                     if key in service or service in key:
                         info = self.business_knowledge[key]
                         context_parts.append(
-                            f"- {service} → {key}: {info['description']}\n"
+                            f"- {service} â†’ {key}: {info['description']}\n"
                             f"  Criticality: {info['criticality']}\n"
                             f"  Compliance: {info['compliance']}\n"
                             f"  Rollback Policy: {info['rollback_policy']}\n"
@@ -305,11 +305,11 @@ class ConsensusEngine:
         
         merged_bugs = []
         for bug in high_conf_bugs:
-            merged_bugs.append(f"✅ {bug}")
+            merged_bugs.append(f"âœ… {bug}")
         for bug in medium_conf_bugs:
-            merged_bugs.append(f"🟡 {bug}")
+            merged_bugs.append(f"ðŸŸ¡ {bug}")
         for bug in low_conf_bugs:
-            merged_bugs.append(f"🔄 {bug}")
+            merged_bugs.append(f"ðŸ”„ {bug}")
         
         if all_verdicts:
             verdict_counts = Counter(all_verdicts)
@@ -352,7 +352,7 @@ class ConsensusEngine:
 def generate_insights(services: List[str], business_impact: int) -> Dict[str, Any]:
     """Generate deployment insights using AI."""
     if not GROQ_API_KEY:
-        logger.warning("❌ GROQ_API_KEY not set – using fallback.")
+        logger.warning("âŒ GROQ_API_KEY not set â€“ using fallback.")
         return _fallback_insights(services, business_impact)
 
     prompt = f"""
@@ -362,7 +362,7 @@ Affected services: {', '.join(services) if services else 'None detected'}
 Business impact: {business_impact}% (estimated)
 
 Provide a structured analysis in JSON ONLY. The JSON must have these exact keys:
-- "simulation": a concise what‑if scenario (string)
+- "simulation": a concise whatâ€‘if scenario (string)
 - "severity": one of "Low", "Medium", "High", or "Critical"
 - "rollback": a list of concrete rollback steps (list of strings)
 - "validation": a list of verification commands (list of strings)
@@ -375,7 +375,7 @@ Example: {{"simulation": "Database fails -> checkout fails.", "severity": "High"
 
     for model in MODELS:
         try:
-            logger.info(f"🧠 Trying model {model} for insights")
+            logger.info(f"ðŸ§  Trying model {model} for insights")
             try:
                 response = client.chat.completions.create(
                     model=model,
@@ -407,18 +407,18 @@ Example: {{"simulation": "Database fails -> checkout fails.", "severity": "High"
             }
             data["tokens_used"] = tokens_used
 
-            logger.info(f"✅ Insights generated with model: {model}")
+            logger.info(f"âœ… Insights generated with model: {model}")
             return data
 
         except Exception as e:
-            logger.error(f"❌ Insight error with {model}: {e}")
+            logger.error(f"âŒ Insight error with {model}: {e}")
 
-    logger.warning("💾 All models failed for insights – using fallback.")
+    logger.warning("ðŸ’¾ All models failed for insights â€“ using fallback.")
     return _fallback_insights(services, business_impact)
 
 
 def generate_inline_suggestions(diff: str, changed_files: list, affected_services: list) -> list:
-    """Generate line‑specific suggestions based on the commit diff."""
+    """Generate lineâ€‘specific suggestions based on the commit diff."""
     if not affected_services or affected_services == ["unknown_service"]:
         return []
     
@@ -429,7 +429,7 @@ def generate_inline_suggestions(diff: str, changed_files: list, affected_service
         diff = diff[:8000] + "\n... (truncated)"
     
     prompt = f"""
-You are a senior DevOps engineer reviewing code changes in real‑time.
+You are a senior DevOps engineer reviewing code changes in realâ€‘time.
 
 Changed files: {', '.join(changed_files)}
 Affected services: {', '.join(affected_services)}
@@ -437,7 +437,7 @@ Affected services: {', '.join(affected_services)}
 Here is the diff:
 {diff}
 
-Analyze these changes and return line‑specific feedback in JSON format:
+Analyze these changes and return lineâ€‘specific feedback in JSON format:
 [
     {{
         "file": "path/to/file.py",
@@ -486,7 +486,7 @@ RULES:
         return []
     
     except Exception as e:
-        logger.error(f"❌ Inline suggestion failed: {e}")
+        logger.error(f"âŒ Inline suggestion failed: {e}")
         return []
 
 
@@ -556,7 +556,7 @@ OUTPUT FORMAT. Return ONLY valid JSON. No other text.
 }}"""
 
     if not GROQ_API_KEY:
-        logger.warning("❌ GROQ_API_KEY not set")
+        logger.warning("âŒ GROQ_API_KEY not set")
         return _fallback_code_review()
 
     client = groq.Groq(api_key=GROQ_API_KEY, timeout=TIMEOUT)
@@ -564,7 +564,7 @@ OUTPUT FORMAT. Return ONLY valid JSON. No other text.
     
     for model in MODELS:
         try:
-            logger.info(f"🧠 Running model: {model}")
+            logger.info(f"ðŸ§  Running model: {model}")
             response = client.chat.completions.create(
                 model=model,
                 messages=[{"role": "user", "content": prompt}],
@@ -582,10 +582,10 @@ OUTPUT FORMAT. Return ONLY valid JSON. No other text.
                     data[key] = []
             
             reviews.append(data)
-            logger.info(f"✅ Model {model} completed successfully")
+            logger.info(f"âœ… Model {model} completed successfully")
             
         except Exception as e:
-            logger.error(f"❌ Model {model} failed: {e}")
+            logger.error(f"âŒ Model {model} failed: {e}")
     
     if not reviews:
         return _fallback_code_review()
@@ -595,7 +595,7 @@ OUTPUT FORMAT. Return ONLY valid JSON. No other text.
     consensus["models_used"] = len(reviews)
     consensus["confidence"] = consensus.get("confidence", 0)
     
-    logger.info(f"🔍 Consensus review: {consensus['overall_verdict']} (confidence: {consensus['confidence']}%)")
+    logger.info(f"ðŸ” Consensus review: {consensus['overall_verdict']} (confidence: {consensus['confidence']}%)")
     
     return consensus
 
@@ -609,7 +609,7 @@ def generate_code_review(diff_content: str, changed_files: list, services: list)
 # Quick test
 # -------------------------------------------------------------------
 if __name__ == "__main__":
-    print("🧪 Testing Multi-Model + RAG Code Review...")
+    print("ðŸ§ª Testing Multi-Model + RAG Code Review...")
     print("=" * 60)
     
     test_diff = """
@@ -624,6 +624,6 @@ def process_payment(amount, user):
     result = generate_code_review(test_diff, test_files, test_services)
     print(json.dumps(result, indent=2))
     
-    print("\n🧪 Testing generate_insights...")
+    print("\nðŸ§ª Testing generate_insights...")
     insights = generate_insights(["payment_service", "login_service"], 80)
     print(json.dumps(insights, indent=2))
