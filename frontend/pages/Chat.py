@@ -1,43 +1,124 @@
+"""
+Chat.py — Lya chat page.
+
+Layout:
+    Header → message list → suggested questions → voice input → chat input.
+
+Backend contracts (all in api_client.py):
+    - POST /api/chat         — text message, timeout 180s
+    - POST /api/chat/clear   — reset session, timeout 30s (session_id as query param)
+    - POST /api/tts          — synthesize speech, timeout 60s
+    - POST /api/stt          — transcribe audio, timeout 180s
+
+Timeouts are explicit and generous. The first STT call after a fresh
+container restart can pay the faster-whisper model load cost even with
+startup warmup, so the client waits long enough for the server to finish
+rather than giving up early with a misleading error.
+"""
+
 import uuid
 import html
 import streamlit as st
 
-def detect_lang(text):
-    """Detect whether the text contains Arabic characters."""
-    return "ar" if any('\u0600' <= c <= '\u06ff' for c in text) else "en"
-
 from api_client import post_json_detailed, post_bytes, post_multipart
 from style import apply_style, sidebar, empty_state
 
-st.set_page_config(page_title="Spectre Chat", page_icon="💬", layout="wide")
+
+# ---------------------------------------------------------------------------
+# Page setup — st.set_page_config must be the first Streamlit call.
+# ---------------------------------------------------------------------------
+st.set_page_config(
+    page_title="Lya — Spectre Impact Assistant",
+    page_icon="💬",
+    layout="wide",
+)
 apply_style()
 sidebar("Chat")
 
-st.title("💬 Lya — Spectre Impact Assistant")
-st.caption("Ask about PR risk, blast radius, affected services, deployment validation, or rollback.")
 
-st.info("🌐 Lya responds in Arabic 🇪🇬 or English 🇬🇧 based on your message.")
-
+# ---------------------------------------------------------------------------
+# Session state
+# ---------------------------------------------------------------------------
 if "spectre_chat" not in st.session_state:
     st.session_state.spectre_chat = []
+
 if "spectre_chat_session_id" not in st.session_state:
     st.session_state.spectre_chat_session_id = str(uuid.uuid4())
+
 if "chat_pending" not in st.session_state:
     st.session_state.chat_pending = None
 
+
+# ---------------------------------------------------------------------------
+# Language helper
+# ---------------------------------------------------------------------------
+def _detect_lang(text: str) -> str:
+    """Return 'ar' if the text contains Arabic characters, otherwise 'en'."""
+    return "ar" if any("\u0600" <= c <= "\u06ff" for c in text) else "en"
+
+
+# ---------------------------------------------------------------------------
+# Header
+# ---------------------------------------------------------------------------
+st.title("💬 Lya — Spectre Impact Assistant")
+st.caption(
+    "Your bilingual DevOps copilot. Ask her about blast radius, business "
+    "impact, past incidents, ownership, or rollback plans — in English or "
+    "Egyptian Arabic."
+)
+
+st.info(
+    "🌐 Lya answers in whatever language you write in. "
+    "She cites evidence from real PRs and services, never guesses."
+)
+
+# Capability hint
+st.markdown(
+    "<div style='display:flex;gap:8px;flex-wrap:wrap;margin:-8px 0 20px 0;'>"
+    "<span style='padding:4px 10px;border-radius:12px;background:#1e293b;color:#94a3b8;font-size:12px;'>Blast radius</span>"
+    "<span style='padding:4px 10px;border-radius:12px;background:#1e293b;color:#94a3b8;font-size:12px;'>Business impact</span>"
+    "<span style='padding:4px 10px;border-radius:12px;background:#1e293b;color:#94a3b8;font-size:12px;'>Past incidents</span>"
+    "<span style='padding:4px 10px;border-radius:12px;background:#1e293b;color:#94a3b8;font-size:12px;'>Ownership</span>"
+    "<span style='padding:4px 10px;border-radius:12px;background:#1e293b;color:#94a3b8;font-size:12px;'>Rollback</span>"
+    "<span style='padding:4px 10px;border-radius:12px;background:#1e293b;color:#94a3b8;font-size:12px;'>Deployment validation</span>"
+    "</div>",
+    unsafe_allow_html=True,
+)
+
+
+# ---------------------------------------------------------------------------
+# Toolbar: message count, New Chat, Export
+# ---------------------------------------------------------------------------
 h1, h2, h3 = st.columns([3, 1, 1])
+
 with h1:
-    st.caption(f"Chat with Lya · {len(st.session_state.spectre_chat)} messages")
+    msg_count = len(st.session_state.spectre_chat)
+    if msg_count == 0:
+        st.caption("Chat with Lya · starting fresh")
+    else:
+        # Detect the language of the most recent user message for a
+        # subtle indicator of which language Lya is replying in.
+        last_user = next(
+            (m for m in reversed(st.session_state.spectre_chat) if m["role"] == "user"),
+            None,
+        )
+        if last_user:
+            lang = _detect_lang(last_user.get("content", ""))
+            lang_label = "🇪🇬 Arabic" if lang == "ar" else "🇬🇧 English"
+            st.caption(f"Chat with Lya · {msg_count} messages · replying in {lang_label}")
+        else:
+            st.caption(f"Chat with Lya · {msg_count} messages")
+
 with h2:
     if st.button("🆕 New Chat", help="Start a new conversation.", use_container_width=True):
         session_id = st.session_state.spectre_chat_session_id
 
-        # The backend contract may expose session_id as a query parameter.
+        # Backend takes session_id as a query parameter.
         ok, data, status = post_json_detailed(
             f"/api/chat/clear?session_id={session_id}",
             {},
         )
-        # Backward-compatible fallback for a backend that still accepts JSON.
+        # Fallback for a backend that still accepts the session_id in the body.
         if not ok and status in (400, 422):
             ok, data, status = post_json_detailed(
                 "/api/chat/clear",
@@ -72,17 +153,29 @@ with h3:
             help="Download this conversation as a text file.",
         )
 
+
+# ---------------------------------------------------------------------------
+# Empty state
+# ---------------------------------------------------------------------------
 if not st.session_state.spectre_chat:
     st.markdown(
         empty_state(
             "🤖",
             "Hi, I'm Lya.",
-            "Ask me about any file in your repo, and I'll tell you what could break.",
+            (
+                "Tell me which file or service you're changing, and I'll show "
+                "you what could break, who owns it, and whether this matches "
+                "a past incident. Try asking about customer_database.tf to see "
+                "what I do."
+            ),
         ),
         unsafe_allow_html=True,
     )
 
-# Render all persisted messages using the same bubble style.
+
+# ---------------------------------------------------------------------------
+# Message list
+# ---------------------------------------------------------------------------
 for i, message in enumerate(st.session_state.spectre_chat):
     role = message["role"]
     css = "spectre-chat-user" if role == "user" else "spectre-chat-assistant"
@@ -99,6 +192,7 @@ for i, message in enumerate(st.session_state.spectre_chat):
     )
 
     if role == "assistant":
+        # Show which tools Lya used to answer.
         tools = message.get("tool_calls") or message.get("tools") or []
         if tools:
             st.caption("🛠️ Tools used")
@@ -110,6 +204,9 @@ for i, message in enumerate(st.session_state.spectre_chat):
                     unsafe_allow_html=True,
                 )
 
+        # Speak button. Timeout is 60s — Edge TTS produces audio in
+        # 1-3 seconds, and the markdown stripping in /api/tts keeps
+        # payloads small. If this ever fails, show the actual error.
         if st.button(
             "🔊 Speak",
             key=f"speak_{i}",
@@ -126,12 +223,19 @@ for i, message in enumerate(st.session_state.spectre_chat):
                     mime if mime.startswith("audio/") else "audio/mpeg",
                 )
             else:
-                st.warning("TTS is not connected yet.")
+                # post_bytes returns the error message as the second value
+                # when the request fails. Surface it instead of hiding it.
+                err = audio.decode("utf-8", errors="replace") if isinstance(audio, bytes) else str(audio)
+                st.warning(f"TTS failed: {err[:200] or 'unknown error'}")
 
         if st.session_state.get(f"chat_audio_{i}"):
             audio, mime = st.session_state[f"chat_audio_{i}"]
             st.audio(audio, format=mime)
 
+
+# ---------------------------------------------------------------------------
+# Suggested questions
+# ---------------------------------------------------------------------------
 st.markdown("### Suggested questions")
 suggestions = [
     "What services are affected by customer_database.tf?",
@@ -150,14 +254,25 @@ for i, question in enumerate(suggestions):
         st.session_state.chat_pending = question
         st.rerun()
 
-# Optional STT integration. If the backend does not expose /api/stt,
-# the UI fails gracefully rather than crashing the page.
+
+# ---------------------------------------------------------------------------
+# Voice input
+# ---------------------------------------------------------------------------
+# The client timeout is 180s, not 60s. Even with startup warmup on the
+# backend, the very first STT request after a fresh container restart can
+# take 30-90 seconds while faster-whisper finishes loading. A 60-second
+# client timeout gives up before the server finishes and reports a
+# misleading "read timeout" error instead of the actual transcript.
 if hasattr(st, "audio_input"):
     st.markdown("### 🎙️ Voice Input")
     audio_input = st.audio_input("Record a question")
     if audio_input is not None:
         st.success("🎙️ Recording captured.")
-        if st.button("Use Recording", key="use_recording", help="Transcribe the recording and send it to Lya."):
+        if st.button(
+            "Use Recording",
+            key="use_recording",
+            help="Transcribe the recording and send it to Lya.",
+        ):
             ok, data, status = post_multipart(
                 "/api/stt",
                 {
@@ -168,6 +283,7 @@ if hasattr(st, "audio_input"):
                     )
                 },
                 {"session_id": st.session_state.spectre_chat_session_id},
+                timeout=180,
             )
             if ok:
                 transcript = (
@@ -191,17 +307,19 @@ if hasattr(st, "audio_input"):
 else:
     st.caption("🎙️ Microphone input requires a recent Streamlit version.")
 
-# Streamlit requires st.chat_input() to be present on every run.
+
+# ---------------------------------------------------------------------------
+# Chat input
+# ---------------------------------------------------------------------------
+# st.chat_input() must be present on every run, so this runs unconditionally.
 pending = st.session_state.pop("chat_pending", None)
 typed = st.chat_input("Ask Lya...", key="lya_chat_input")
 prompt = typed or pending
 
 if prompt:
-    st.session_state.spectre_chat.append(
-        {"role": "user", "content": prompt}
-    )
+    st.session_state.spectre_chat.append({"role": "user", "content": prompt})
 
-    # Animated typing indicator while the request is in flight.
+    # Typing indicator while the request is in flight.
     typing = st.empty()
     typing.markdown(
         "<div class='spectre-typing'><span></span><span></span><span></span></div>",
@@ -229,11 +347,7 @@ if prompt:
         )
         tools = data.get("tool_calls") or data.get("tools") or []
         st.session_state.spectre_chat.append(
-            {
-                "role": "assistant",
-                "content": answer,
-                "tool_calls": tools,
-            }
+            {"role": "assistant", "content": answer, "tool_calls": tools}
         )
     elif status == 400:
         msg = (
@@ -263,4 +377,4 @@ if prompt:
             {"role": "assistant", "content": f"🔌 {msg}"}
         )
 
-    st.rerun()
+    st.rerun() 
