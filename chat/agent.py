@@ -15,7 +15,7 @@ History:
 Session awareness:
     On every chat call, we touch the session via `chat.memory`, read the
     resulting context (mood, session age, turn count, recent incidents,
-    cross-session patterns), and inject a compact context block into the
+    cross-session patterns), and append a compact context block to the
     system prompt.
 
 Runtime guard:
@@ -187,7 +187,7 @@ def _extract_service_names(message: str) -> list[str]:
 # Session context formatting
 # ---------------------------------------------------------------------------
 def _format_context_block(ctx: dict[str, Any]) -> str:
-    """Build a compact context block to inject into the system prompt."""
+    """Build a compact context block to append to the system prompt."""
     if not ctx:
         return ""
 
@@ -314,9 +314,11 @@ async def chat(
         3. Extract service names and record them as incidents.
         4. Read back the full session context.
         5. Orphan follow-up guard.
-        6. Call Groq with tools. If the model wants to call a tool,
+        6. Build the message list: SYSTEM_PROMPT (+ context) first, then
+           history, then the current user turn.
+        7. Call Groq with tools. If the model wants to call a tool,
            execute it, append the result, and call again.
-        7. Return the final text and the list of tools invoked.
+        8. Return the final text and the list of tools invoked.
 
     Args:
         message: The user's message text.
@@ -380,8 +382,15 @@ async def chat(
 
     groq_messages: list[dict[str, Any]] = []
 
+    # The system prompt is the foundation of Lya's behavior: her personality,
+    # the bilingual rules, the four modes, the feminine Arabic grammar, the
+    # citation style, the push-back policy. It MUST be the first message on
+    # every call. The session context block is appended to it as a suffix so
+    # the model reads both in a single system turn.
+    system_content = SYSTEM_PROMPT
     if context_block:
-        groq_messages.append({"role": "system", "content": context_block})
+        system_content = f"{SYSTEM_PROMPT}\n\n---\n\n{context_block}"
+    groq_messages.append({"role": "system", "content": system_content})
 
     for turn in history or []:
         if not isinstance(turn, dict):
