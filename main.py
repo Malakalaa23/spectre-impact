@@ -482,6 +482,54 @@ async def _preload_heavy_models() -> None:
     except Exception as exc:
         log(f"RAG pre-load failed (will load on first use): {exc}")
 
+    # Warm the chat agent. The point is to pay lazy-import and
+    # network-handshake cost at boot instead of on the first real user.
+    # We deliberately do NOT call lya_chat(): that runs two Groq calls
+    # (tool-plan + reply), which on the free tier burns the rate limit
+    # immediately and forces a 14-second retry for the next caller.
+    # One raw SDK call is enough to warm the SDK, DNS, and TLS.
+    try:
+        import groq as _groq_sdk
+        _key = os.getenv("GROQ_API_KEY")
+        if _key:
+            def _one_warmup_call():
+                c = _groq_sdk.Groq(api_key=_key, timeout=20.0, max_retries=0)
+                c.chat.completions.create(
+                    model="openai/gpt-oss-20b",
+                    messages=[{"role": "user", "content": "ok"}],
+                    max_tokens=4,
+                )
+            await asyncio.to_thread(_one_warmup_call)
+            log("Chat agent warmed")
+        else:
+            log("Chat warmup skipped: GROQ_API_KEY not set")
+    except Exception as exc:
+        log(f"Chat warmup failed (will load on first use): {exc}")
+
+    # Warm the chat agent. The point is to pay lazy-import and
+    # network-handshake cost at boot instead of on the first real user.
+    # We deliberately do NOT call lya_chat(): that runs two Groq calls
+    # (tool-plan + reply), which on the free tier burns the rate limit
+    # immediately and forces a 14-second retry for the next caller.
+    # One raw SDK call is enough to warm the SDK, DNS, and TLS.
+    try:
+        import groq as _groq_sdk
+        _key = os.getenv("GROQ_API_KEY")
+        if _key:
+            def _one_warmup_call():
+                c = _groq_sdk.Groq(api_key=_key, timeout=20.0, max_retries=0)
+                c.chat.completions.create(
+                    model="openai/gpt-oss-20b",
+                    messages=[{"role": "user", "content": "ok"}],
+                    max_tokens=4,
+                )
+            await asyncio.to_thread(_one_warmup_call)
+            log("Chat agent warmed")
+        else:
+            log("Chat warmup skipped: GROQ_API_KEY not set")
+    except Exception as exc:
+        log(f"Chat warmup failed (will load on first use): {exc}")
+
 
 @app.on_event("shutdown")
 async def _stop_live_demo_stream() -> None:
@@ -1131,6 +1179,151 @@ def metrics():
     total_prs = len(analyses)
     high_risk_prs = sum(1 for a in analyses if a.get("severity") in ("Critical", "High"))
     return {"total_prs": total_prs, "high_risk_prs": high_risk_prs}
+
+
+
+
+# -------------------------------------------------------------------
+# Compatibility endpoints — called by the frontend pages
+# -------------------------------------------------------------------
+class ReviewRequest(BaseModel):
+    pr_number: int
+    repository: str
+    changed_files: list[str] = []
+
+
+class RollbackRequest(BaseModel):
+    pr_number: int
+    action: str = "dry_run"          # "dry_run" or "execute"
+    confirm: str | None = None       # must be "CONFIRM" for execute
+    reauth_user: str | None = None   # engineering username for execute
+
+
+@app.post("/api/review")
+async def review_endpoint(req: ReviewRequest) -> dict[str, Any]:
+    """
+    Run the code review pipeline on a PR. Fetches the diff, runs static
+    analysis + AI review, returns the full_review dict.
+    """
+    log(f"/api/review pr={req.pr_number} repo={req.repository} files={len(req.changed_files)}")
+
+    diff = ""
+    if GITHUB_TOKEN:
+        try:
+            commit_sha = get_commit_sha_from_pr(req.repository, req.pr_number)
+            if commit_sha:
+                diff = fetch_commit_diff(req.repository, commit_sha)
+        except Exception as exc:
+            log(f"/api/review diff fetch failed: {exc}")
+
+    try:
+        from code_review.reviewer import full_review
+        result = await asyncio.to_thread(full_review, diff, ".")
+    except Exception as exc:
+        log(f"/api/review failed: {exc}")
+        raise HTTPException(status_code=500, detail=f"Review failed: {exc}") from exc
+
+    result = dict(result or {})
+    result.setdefault("changed_files", req.changed_files)
+    result["pr_number"] = req.pr_number
+    result["repository"] = req.repository
+    return result
+
+
+@app.post("/api/rollback")
+async def rollback_endpoint(req: RollbackRequest) -> dict[str, Any]:
+    """
+    Dry-run or execute the rollback plan associated with a PR.
+
+    Execution requires confirm="CONFIRM" and a non-empty reauth_user.
+    """
+    log(f"/api/rollback pr={req.pr_number} action={req.action}")
+
+    analysis = get_pr_analysis(req.pr_number)
+    if not analysis:
+        raise HTTPException(status_code=404, detail=f"No analysis for PR #{req.pr_number}")
+
+    steps = analysis.get("rollback") or []
+    if not steps:
+        return {"message": "No rollback plan available for this PR.", "results": [], "dry_run": True}
+
+    is_dry_run = req.action != "execute"
+    if not is_dry_run:
+        if (req.confirm or "").strip() != "CONFIRM":
+            raise HTTPException(status_code=400, detail="Confirmation required")
+        if not (req.reauth_user or "").strip():
+            raise HTTPException(status_code=400, detail="Re-authentication required")
+
+    try:
+        from rollback_executor import execute_rollback
+        result = await asyncio.to_thread(execute_rollback, steps, dry_run=is_dry_run)
+    except Exception as exc:
+        log(f"/api/rollback failed: {exc}")
+        raise HTTPException(status_code=500, detail=f"Rollback failed: {exc}") from exc
+
+    results = (result or {}).get("results", [])
+    if is_dry_run:
+        msg = f"Dry run completed. {len(results)} step(s) simulated."
+    else:
+        msg = f"Rollback executed. {len(results)} step(s) processed."
+
+    return {"message": msg, "results": results, "dry_run": is_dry_run}
+
+
+@app.get("/api/audit")
+def audit_endpoint(limit: int = 50) -> dict[str, Any]:
+    """Return recent rollback audit log entries, newest first."""
+    limit = max(1, min(limit, 500))
+    from database import _get_connection
+    conn = _get_connection()
+    cur = conn.cursor()
+    cur.execute(
+        "SELECT * FROM rollback_audit_log ORDER BY id DESC LIMIT ?",
+        (limit,),
+    )
+    rows = cur.fetchall()
+    cols = [d[0] for d in cur.description] if cur.description else []
+    entries = [dict(zip(cols, row)) for row in rows]
+    return {"count": len(entries), "entries": entries}
+
+
+@app.post("/api/voice/{pr_number}")
+async def voice_endpoint(pr_number: int):
+    """
+    Synthesize a short spoken summary of PR #N. Returns MP3 bytes.
+    The frontend's PR Analysis page hits this to play the verdict aloud.
+    """
+    log(f"/api/voice pr={pr_number}")
+
+    analysis = get_pr_analysis(pr_number)
+    if not analysis:
+        raise HTTPException(status_code=404, detail=f"No analysis for PR #{pr_number}")
+
+    affected = analysis.get("affected_services") or []
+    impact = analysis.get("business_impact", 0)
+    severity = analysis.get("severity") or "Unknown"
+
+    text = (
+        f"Pull request number {pr_number}. "
+        f"Severity {severity}. "
+        f"Business impact {impact} percent. "
+        f"{len(affected)} services affected."
+    )
+
+    try:
+        audio = await tts_synthesize(text, language="en", voice=None)
+    except Exception as exc:
+        log(f"/api/voice synth failed: {exc}")
+        raise HTTPException(status_code=500, detail="Voice synthesis failed") from exc
+
+    if not audio:
+        raise HTTPException(status_code=500, detail="Voice synthesis produced empty audio")
+
+    return Response(
+        content=audio,
+        media_type="audio/mpeg",
+        headers={"Cache-Control": "no-store"},
+    )
 
 
 # -------------------------------------------------------------------

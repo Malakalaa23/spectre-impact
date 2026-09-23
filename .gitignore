@@ -44,3 +44,12 @@ _archive_*/
 # pre-populated ChromaDB and analysis database ship with the repository so
 # that fresh clones and cold deploys work instantly, with no RAG warm-up
 # and no empty dashboard on first load.
+
+# Local tooling — diagnostics and one-shot patch scripts. Not shipped.
+patch_*.py
+fix_*.py
+measure.py
+run_all_tests.py
+smoke_test.py
+diagnose_*.py
+test_everything.py

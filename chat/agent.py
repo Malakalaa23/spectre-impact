@@ -64,7 +64,7 @@ logger = logging.getLogger(__name__)
 # Override with SPECTRE_CHAT_MODEL if a specific model is needed.
 DEFAULT_MODEL = os.getenv("SPECTRE_CHAT_MODEL", "openai/gpt-oss-20b")
 DEFAULT_TEMPERATURE = 0
-MAX_TOKENS = 1500
+MAX_TOKENS = 700
 GROQ_TIMEOUT = 30.0
 MAX_TOOL_ITERATIONS = 5
 
@@ -287,12 +287,25 @@ async def _execute_tool(tool: BaseTool, tool_input: dict[str, Any]) -> str:
         logger.warning("Tool %s failed: %s", tool.name, exc)
         return f"Tool error: {exc}"
 
+    # Cap what goes back to the model. The blast-radius tool returns the
+    # full BFS result: 15 services plus every evidence path. That is 5-10
+    # KB of JSON the model reads before it can even start writing the
+    # reply, and it dominates latency on tool-calling turns. Trimming to
+    # 3000 chars keeps the substance and drops the tail.
+    TOOL_RESULT_MAX_CHARS = 3000
+
     if isinstance(result, str):
-        return result
-    try:
-        return json.dumps(result, default=str, ensure_ascii=False)
-    except Exception:
-        return str(result)
+        text = result
+    else:
+        try:
+            text = json.dumps(result, default=str, ensure_ascii=False)
+        except Exception:
+            text = str(result)
+
+    if len(text) > TOOL_RESULT_MAX_CHARS:
+        text = text[:TOOL_RESULT_MAX_CHARS] + "\n... [trimmed]"
+
+    return text
 
 
 # ---------------------------------------------------------------------------
@@ -424,7 +437,7 @@ async def chat(
             "tool_calls": [],
         }
 
-    client = groq_sdk.Groq(api_key=api_key, timeout=GROQ_TIMEOUT)
+    client = groq_sdk.Groq(api_key=api_key, timeout=GROQ_TIMEOUT, max_retries=0)
     tool_schemas = _build_tool_schemas(tools)
     tools_used: list[str] = []
 
@@ -439,6 +452,7 @@ async def chat(
                 tool_choice="auto" if tool_schemas else None,
                 temperature=DEFAULT_TEMPERATURE,
                 max_tokens=MAX_TOKENS,
+                reasoning_effort="low",
             )
         except Exception as exc:  # noqa: BLE001
             logger.exception("Groq call failed")

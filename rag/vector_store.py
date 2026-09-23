@@ -43,6 +43,11 @@ Public API:
     search_similar(...)          — top-K nearest neighbors
     collection_stats()           — count, dimensions, backend info
     reset_collection()           — wipe and recreate (for re-population)
+
+Compatibility:
+    A `VectorStore` class and `get_store()` singleton are also exposed
+    for callers written against an older class-based API. They wrap the
+    module-level functions above and hit the same collection.
 """
 
 from __future__ import annotations
@@ -337,6 +342,122 @@ def reset_collection() -> None:
     logger.info("Collection '%s' recreated", COLLECTION_NAME)
 
 
+# ---------------------------------------------------------------------------
+# VectorStore class — compatibility shim
+# ---------------------------------------------------------------------------
+# Older code (rag/enrich.py and Abu Bakr's tests) was written against a
+# class-based API with `.add()`, `.query()`, and a `get_store()` singleton.
+# The module-level functions above are the primary interface now. This
+# class is a thin wrapper so both APIs hit the same ChromaDB collection
+# and share the same embedding model.
+_store_singleton: "VectorStore | None" = None
+
+
+class VectorStore:
+    """
+    Class-based wrapper around the module-level functions.
+
+    Exists so code written against an older class-based API still works.
+    The underlying collection, embedding model, and DB path are shared
+    with the module-level functions — instantiating this twice does not
+    open a second collection or reload the model.
+    """
+
+    def __init__(
+        self,
+        path: str | Path | None = None,
+        db_path: str | Path | None = None,
+        collection: Any = None,
+    ) -> None:
+        # `collection` short-circuits everything: a pre-built ChromaDB
+        # collection handle is used as-is, no client construction.
+        if collection is not None:
+            self._collection = collection
+            return
+
+        # `path` wins over `db_path` if both are provided. Neither means
+        # "use the module-level default collection".
+        explicit = path if path is not None else db_path
+        if explicit is None:
+            self._collection = get_collection()
+        else:
+            key = str(Path(explicit).resolve())
+            Path(key).mkdir(parents=True, exist_ok=True)
+            client = chromadb.PersistentClient(path=key)
+            self._collection = client.get_or_create_collection(
+                name=COLLECTION_NAME,
+                metadata={"hnsw:space": "cosine"},
+            )
+
+    def add(
+        self,
+        doc_id: str,
+        text: str,
+        metadata: dict[str, Any] | None = None,
+    ) -> None:
+        """
+        Add one document. Empty or whitespace-only text is skipped
+        silently — the old class-based API behaved this way, and one
+        of Abu Bakr's tests asserts it.
+
+        Uses upsert, not add, so re-adding the same id is idempotent.
+        ChromaDB's `add` raises on duplicate ids.
+        """
+        if not text or not text.strip():
+            return
+
+        meta = dict(metadata or {})
+        # Older callers carried doc_type inside the metadata dict.
+        # The module-level add_document takes it as a separate arg;
+        # pull it out here so both call styles produce the same metadata.
+        doc_type = meta.pop("doc_type", None) or meta.pop("type", None) or "general"
+        meta["type"] = doc_type
+
+        embedding = get_embedding(text)
+        self._collection.upsert(
+            ids=[doc_id],
+            embeddings=[embedding],
+            documents=[text],
+            metadatas=[meta],
+        )
+
+    def query(self, text: str, n_results: int = 5) -> dict[str, Any]:
+        """
+        Search by text. Returns ChromaDB's native result shape.
+
+        n_results <= 0 returns an empty result rather than raising,
+        matching the old class behavior that two tests depend on.
+        """
+        if n_results <= 0:
+            return {
+                "ids": [[]],
+                "documents": [[]],
+                "metadatas": [[]],
+                "distances": [[]],
+            }
+        return search_similar(query=text, n_results=n_results)
+
+    def count(self) -> int:
+        """Number of documents in the collection."""
+        return self._collection.count()
+
+    def __len__(self) -> int:
+        return self.count()
+
+
+def get_store() -> VectorStore:
+    """Singleton accessor — matches the API Abu Bakr's tests expect."""
+    global _store_singleton
+    if _store_singleton is None:
+        _store_singleton = VectorStore()
+    return _store_singleton
+
+
+def query_documents(query: str, n_results: int = 5) -> dict:
+    """Alias for search_similar, kept for callers using the older API."""
+    return search_similar(query=query, n_results=n_results)
+
+
 __all__ = [
     "get_collection",
     "get_embedding",
@@ -344,6 +465,9 @@ __all__ = [
     "add_document",
     "add_documents_batch",
     "search_similar",
+    "query_documents",
     "collection_stats",
     "reset_collection",
+    "VectorStore",
+    "get_store",
 ]

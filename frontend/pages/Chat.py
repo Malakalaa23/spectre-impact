@@ -215,7 +215,9 @@ for i, message in enumerate(st.session_state.spectre_chat):
                     mime if mime.startswith("audio/") else "audio/mpeg",
                 )
             else:
-                err = audio.decode("utf-8", errors="replace") if isinstance(audio, bytes) else str(audio)
+                # post_bytes returns (False, b"", <error string>) on failure.
+                # The error lives in the third slot, not the second.
+                err = mime if isinstance(mime, str) else str(mime)
                 st.warning(f"TTS failed: {err[:200] or 'unknown error'}")
 
         if st.session_state.get(f"chat_audio_{i}"):
