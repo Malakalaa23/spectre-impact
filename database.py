@@ -5,6 +5,7 @@ Stores:
     - PR analyses (webhook results)
     - Commit analyses (push results)
     - User feedback on AI-generated insights (for the AI learning loop)
+    - Rollback audit log (for the safe rollback executor)
 
 Concurrency:
     The connection is opened with a 5-second busy timeout and WAL
@@ -41,6 +42,10 @@ Public API:
         save_feedback(target_type, target_id, verdict, user_id, notes)
         get_feedback(limit)
         get_feedback_stats()
+
+    Rollback audit log:
+        init_rollback_audit_table()
+        (writes come from rollback_executor.execute_rollback)
 
     All tables:
         init_all()
@@ -436,6 +441,49 @@ def get_feedback_stats() -> dict:
 
 
 # ===========================================================================
+# Rollback audit log
+# ===========================================================================
+def init_rollback_audit_table():
+    """
+    Create the rollback_audit_log table.
+
+    Every call to the rollback executor writes one row here — whether
+    the command was blocked, dry-run, executed, or failed. This is the
+    audit trail enterprises ask for before they will let an automated
+    system touch production.
+
+    Schema:
+        id           — auto increment
+        command      — the exact command string that was submitted
+        dry_run      — 1 if this was a dry run, 0 if it was a real execution
+        status       — "blocked" | "dry_run_ok" | "success" | "failed"
+        output       — stdout/stderr, or the reason a command was blocked
+        created_at   — ISO-8601 UTC timestamp
+    """
+    conn = _get_connection()
+    conn.execute(
+        """
+        CREATE TABLE IF NOT EXISTS rollback_audit_log (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            command TEXT NOT NULL,
+            dry_run INTEGER NOT NULL DEFAULT 1,
+            status TEXT NOT NULL,
+            output TEXT,
+            created_at TEXT NOT NULL
+        )
+        """
+    )
+    conn.execute(
+        "CREATE INDEX IF NOT EXISTS idx_rollback_created ON rollback_audit_log(created_at)"
+    )
+    conn.execute(
+        "CREATE INDEX IF NOT EXISTS idx_rollback_status ON rollback_audit_log(status)"
+    )
+    conn.commit()
+    conn.close()
+
+
+# ===========================================================================
 # Init all tables
 # ===========================================================================
 def init_all():
@@ -443,6 +491,7 @@ def init_all():
     init_db()
     init_commit_table()
     init_feedback_table()
+    init_rollback_audit_table()
 
 
 init_all()
