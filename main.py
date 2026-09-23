@@ -703,15 +703,43 @@ def feedback_recent(limit: int = 20) -> dict[str, Any]:
 async def tts_endpoint(req: TTSRequest):
     log(f"/api/tts lang={req.language} chars={len(req.text)}")
 
-    # Strip markdown and table markup before synthesis. Edge TTS reads
-    # asterisks, backticks, pipes, and hashes literally.
+    # Strip markdown, filenames, and technical punctuation before synthesis.
+    # Edge TTS reads `**bold**` as "asterisk asterisk bold", file paths as
+    # "customer underscore database dot tee eff", and bare slashes as
+    # "slash". None of that is what a person would say. We clean it all
+    # here, after the API call but before Edge TTS sees the string.
     clean_text = req.text
-    clean_text = re.sub(r"\*\*(.+?)\*\*", r"\1", clean_text)
-    clean_text = re.sub(r"\*(.+?)\*", r"\1", clean_text)
-    clean_text = re.sub(r"`([^`]+)`", r"\1", clean_text)
-    clean_text = re.sub(r"^#{1,6}\s+", "", clean_text, flags=re.M)
-    clean_text = re.sub(r"^\s*\|.*\|\s*$", "", clean_text, flags=re.M)
-    clean_text = re.sub(r"^\s*[-*]\s+", "", clean_text, flags=re.M)
+
+    # Markdown formatting
+    clean_text = re.sub(r"\*\*(.+?)\*\*", r"\1", clean_text)       # **bold**
+    clean_text = re.sub(r"\*(.+?)\*", r"\1", clean_text)           # *italic*
+    clean_text = re.sub(r"`([^`]+)`", r"\1", clean_text)           # `code`
+    clean_text = re.sub(r"^#{1,6}\s+", "", clean_text, flags=re.M) # # headers
+    clean_text = re.sub(r"^\s*\|.*\|\s*$", "", clean_text, flags=re.M)  # tables
+    clean_text = re.sub(r"^\s*[-*]\s+", "", clean_text, flags=re.M)     # bullets
+
+    # File extensions — spell them the way a person reads them aloud.
+    # These run before we strip dots, so the extension is still intact.
+    clean_text = re.sub(r"\.tf\b", " tee eff", clean_text)
+    clean_text = re.sub(r"\.py\b", " pie", clean_text)
+    clean_text = re.sub(r"\.jsx\b", " jay ess ex", clean_text)
+    clean_text = re.sub(r"\.tsx\b", " tee ess ex", clean_text)
+    clean_text = re.sub(r"\.json\b", " jay son", clean_text)
+    clean_text = re.sub(r"\.yaml\b", " yammel", clean_text)
+    clean_text = re.sub(r"\.yml\b", " yammel", clean_text)
+    clean_text = re.sub(r"\.md\b", " markdown", clean_text)
+
+    # Filenames and identifiers: underscores, slashes, and dashes become
+    # spaces. "customer_database" → "customer database". "services/payment"
+    # → "services payment".
+    clean_text = re.sub(r"(?<=\w)_(?=\w)", " ", clean_text)
+    clean_text = re.sub(r"(?<=\w)/(?=\w)", " ", clean_text)
+    clean_text = re.sub(r"(?<=\w)-(?=\w)", " ", clean_text)
+
+    # Remaining bare slashes, asterisks, backticks, pipes, brackets.
+    clean_text = re.sub(r"[*/`|\[\]{}]", " ", clean_text)
+
+    # Collapse whitespace and paragraph breaks.
     clean_text = re.sub(r"\n{2,}", ". ", clean_text)
     clean_text = re.sub(r"\s+", " ", clean_text).strip()
 

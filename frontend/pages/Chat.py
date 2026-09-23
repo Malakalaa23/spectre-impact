@@ -96,8 +96,6 @@ with h1:
     if msg_count == 0:
         st.caption("Chat with Lya · starting fresh")
     else:
-        # Detect the language of the most recent user message for a
-        # subtle indicator of which language Lya is replying in.
         last_user = next(
             (m for m in reversed(st.session_state.spectre_chat) if m["role"] == "user"),
             None,
@@ -113,12 +111,10 @@ with h2:
     if st.button("🆕 New Chat", help="Start a new conversation.", use_container_width=True):
         session_id = st.session_state.spectre_chat_session_id
 
-        # Backend takes session_id as a query parameter.
         ok, data, status = post_json_detailed(
             f"/api/chat/clear?session_id={session_id}",
             {},
         )
-        # Fallback for a backend that still accepts the session_id in the body.
         if not ok and status in (400, 422):
             ok, data, status = post_json_detailed(
                 "/api/chat/clear",
@@ -192,7 +188,6 @@ for i, message in enumerate(st.session_state.spectre_chat):
     )
 
     if role == "assistant":
-        # Show which tools Lya used to answer.
         tools = message.get("tool_calls") or message.get("tools") or []
         if tools:
             st.caption("🛠️ Tools used")
@@ -204,9 +199,6 @@ for i, message in enumerate(st.session_state.spectre_chat):
                     unsafe_allow_html=True,
                 )
 
-        # Speak button. Timeout is 60s — Edge TTS produces audio in
-        # 1-3 seconds, and the markdown stripping in /api/tts keeps
-        # payloads small. If this ever fails, show the actual error.
         if st.button(
             "🔊 Speak",
             key=f"speak_{i}",
@@ -223,8 +215,6 @@ for i, message in enumerate(st.session_state.spectre_chat):
                     mime if mime.startswith("audio/") else "audio/mpeg",
                 )
             else:
-                # post_bytes returns the error message as the second value
-                # when the request fails. Surface it instead of hiding it.
                 err = audio.decode("utf-8", errors="replace") if isinstance(audio, bytes) else str(audio)
                 st.warning(f"TTS failed: {err[:200] or 'unknown error'}")
 
@@ -258,11 +248,6 @@ for i, question in enumerate(suggestions):
 # ---------------------------------------------------------------------------
 # Voice input
 # ---------------------------------------------------------------------------
-# The client timeout is 180s, not 60s. Even with startup warmup on the
-# backend, the very first STT request after a fresh container restart can
-# take 30-90 seconds while faster-whisper finishes loading. A 60-second
-# client timeout gives up before the server finishes and reports a
-# misleading "read timeout" error instead of the actual transcript.
 if hasattr(st, "audio_input"):
     st.markdown("### 🎙️ Voice Input")
     audio_input = st.audio_input("Record a question")
@@ -311,7 +296,6 @@ else:
 # ---------------------------------------------------------------------------
 # Chat input
 # ---------------------------------------------------------------------------
-# st.chat_input() must be present on every run, so this runs unconditionally.
 pending = st.session_state.pop("chat_pending", None)
 typed = st.chat_input("Ask Lya...", key="lya_chat_input")
 prompt = typed or pending
@@ -322,7 +306,13 @@ if prompt:
     # Typing indicator while the request is in flight.
     typing = st.empty()
     typing.markdown(
-        "<div class='spectre-typing'><span></span><span></span><span></span></div>",
+        "<div style='padding:12px 16px;color:#94a3b8;font-size:14px;"
+        "display:flex;align-items:center;gap:10px;'>"
+        "<span>🤖 <b style='color:#e2e8f0;'>Lya</b> is analyzing your request</span>"
+        "<span class='spectre-typing'>"
+        "<span></span><span></span><span></span>"
+        "</span>"
+        "</div>",
         unsafe_allow_html=True,
     )
 
@@ -377,4 +367,4 @@ if prompt:
             {"role": "assistant", "content": f"🔌 {msg}"}
         )
 
-    st.rerun() 
+    st.rerun()

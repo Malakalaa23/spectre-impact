@@ -12,7 +12,7 @@ env/
 __pycache__/
 *.pyc
 *.pyo
-*.pytest_cache/
+.pytest_cache/
 .mypy_cache/
 
 # Local data
@@ -20,12 +20,15 @@ __pycache__/
 
 # Logs
 *.log
+*_output.txt
 
 # Test audio
 tts_*.mp3
 test_*.mp3
+test_audio.wav
+test_speech.ogg
 
-# Local scripts
+# Local diagnostic scripts (not shipped, not committed)
 audit_*.py
 audit_*.txt
 diagnose_*.py
@@ -33,13 +36,11 @@ dump_*.py
 dump_*.txt
 analyze_*.py
 
-# Backups
+# Backups and archives
 *.bak
-
-# Archive
 _archive_*/
 
-# Note: rag_db/ and history.db are intentionally NOT ignored.
-# The pre-populated ChromaDB and analysis database ship with the repository
-# so that fresh clones and cold deploys work instantly — no 60-second
-# warm-up on the first RAG query, and no empty dashboard on first load.
+# Note: rag_db/ and history.db are intentionally NOT ignored. The
+# pre-populated ChromaDB and analysis database ship with the repository so
+# that fresh clones and cold deploys work instantly, with no RAG warm-up
+# and no empty dashboard on first load.
