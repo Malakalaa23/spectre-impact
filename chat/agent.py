@@ -55,17 +55,22 @@ logger = logging.getLogger(__name__)
 DEFAULT_MODEL = os.getenv("SPECTRE_CHAT_MODEL", "openai/gpt-oss-20b")
 DEFAULT_TEMPERATURE = 0
 MAX_TOKENS = 700
-GROQ_TIMEOUT = 30.0
 
-# Tool-calling loop. Every iteration is a separate Groq call. Cutting
-# from 5 to 3 shaves ~2-4 seconds off a tool-heavy turn without losing
-# the ability to chain tools (analyze -> list -> details is 3 hops).
-MAX_TOOL_ITERATIONS = 3
+# Per-call timeout. 15s is plenty for gpt-oss-20b — if Groq hasn't
+# answered by then, either the network is degraded or we're being
+# throttled. Better to fail fast and fall over to multi_provider than
+# make the user stare at a spinner for a minute.
+GROQ_TIMEOUT = 15.0
 
-# Retry policy for 429s. Keep the retries short: if two attempts fail,
-# fall over to multi_provider rather than making the user wait longer.
-GROQ_RETRY_ATTEMPTS = 2
-GROQ_RETRY_BASE_WAIT = 4.0  # seconds
+# Tool-calling loop. Every iteration is a separate Groq call. Two hops
+# covers the realistic chains (analyze -> list) and keeps worst-case
+# latency bounded. Groq almost never needs a third hop.
+MAX_TOOL_ITERATIONS = 2
+
+# Retry policy for 429s. One short retry, then fall over. Long retries
+# make the user wait longer than just switching providers does.
+GROQ_RETRY_ATTEMPTS = 1
+GROQ_RETRY_BASE_WAIT = 2.0  # seconds
 
 # History window. Each turn costs ~80-150 tokens. Six is enough to
 # preserve thread while staying under the free-tier TPM limit.

@@ -79,6 +79,27 @@ def log(msg: str) -> None:
     print(msg, flush=True)
 
 
+def _running_under_streamlit() -> bool:
+    """
+    Return True when this process is a Streamlit frontend, not the FastAPI
+    backend.
+
+    Streamlit sets STREAMLIT_SERVER_PORT in the environment when it
+    launches, and imports the `streamlit` module into sys.modules. Either
+    signal means we are inside Streamlit's script runner, and the FastAPI
+    startup handlers should NOT do their heavy work (loading Whisper,
+    embeddings, ChromaDB) — the separate uvicorn process already did it.
+
+    Without this guard, Streamlit's first render blocks for minutes
+    loading models that the frontend never uses directly.
+    """
+    if os.getenv("STREAMLIT_SERVER_PORT"):
+        return True
+    if "streamlit" in sys.modules:
+        return True
+    return False
+
+
 # -------------------------------------------------------------------
 # FastAPI app
 # -------------------------------------------------------------------
@@ -235,8 +256,6 @@ except ImportError as e:
 
 
 # Terraform parser — onboarding demo. Mounts /api/parse-terraform/*.
-# Import is guarded so a missing python-hcl2 or a broken terraform_parser
-# never takes the whole app down; the CLI still works independently.
 try:
     from terraform_api import router as terraform_router
     app.include_router(terraform_router)
@@ -413,6 +432,11 @@ async def _run_live_demo_stream(interval_seconds: int = 30) -> None:
 @app.on_event("startup")
 async def _start_live_demo_stream() -> None:
     global _live_feed_task
+    # Skip inside Streamlit — this is the frontend, not the backend. The
+    # backend uvicorn process owns the live feed.
+    if _running_under_streamlit():
+        log("Streamlit detected — skipping live demo stream in frontend process")
+        return
     if _live_feed_task is None or _live_feed_task.done():
         _live_feed_task = asyncio.create_task(_run_live_demo_stream(interval_seconds=30))
 
@@ -420,10 +444,14 @@ async def _start_live_demo_stream() -> None:
 @app.on_event("startup")
 async def _preload_heavy_models() -> None:
     """Pre-load and warm every heavy model at startup."""
+    # Skip inside Streamlit — the frontend talks to the backend over
+    # HTTP and never needs the models in-process.
+    if _running_under_streamlit():
+        log("Streamlit detected — skipping heavy model preload (backend handles this)")
+        return
+
     # Render's free tier has 512MB RAM. Preloading Whisper will crash it.
-    # We detect Render via a standard environment variable and skip STT.
     is_render = os.getenv("RENDER", "false").lower() == "true"
-    
     if is_render:
         log("Render environment detected. Skipping heavy model preloading to prevent OOM.")
         return
@@ -441,7 +469,6 @@ async def _preload_heavy_models() -> None:
     except Exception as exc:
         log(f"STT pre-load failed (will load on first use): {exc}")
 
-    # RAG preloading is lighter, keep it but wrap it tightly
     try:
         from rag.vector_store import (
             _get_model as _embed_get_model,
@@ -516,12 +543,6 @@ class TTSRequest(BaseModel):
 # -------------------------------------------------------------------
 # Compatibility endpoints — called by the frontend pages
 # -------------------------------------------------------------------
-#
-# The Streamlit pages send `pr_number` in whatever form the PR list
-# uses. Depending on how data.py shapes the list, that can be an int
-# (445), a plain string ("445"), or a prefixed string ("#445" /
-# "PR-445"). Rather than fail with a 422, we coerce every accepted
-# shape to a plain int here.
 def _coerce_pr_number(v: Any) -> int:
     """Normalise any of {int, '445', '#445', 'PR-445'} to 445."""
     if isinstance(v, int):
@@ -558,14 +579,7 @@ class RollbackRequest(BaseModel):
 
 @app.post("/api/review")
 async def review_endpoint(req: ReviewRequest) -> dict[str, Any]:
-    """
-    Run the code review pipeline on a PR and flatten the result into
-    the shape the Code_Review.py page expects.
-
-    full_review() returns nested dicts (semgrep, bandit, radon, ai_review).
-    The frontend reads `summary` and `findings` at the top level, so we
-    flatten everything into a single findings array with a type tag.
-    """
+    """Run the code review pipeline on a PR and flatten the result."""
     log(f"/api/review pr={req.pr_number} repo={req.repository} files={len(req.changed_files)}")
 
     diff = ""
@@ -635,11 +649,7 @@ async def review_endpoint(req: ReviewRequest) -> dict[str, Any]:
 
 @app.post("/api/rollback")
 async def rollback_endpoint(req: RollbackRequest) -> dict[str, Any]:
-    """
-    Dry-run or execute the rollback plan associated with a PR.
-
-    Execution requires confirm="CONFIRM" and a non-empty reauth_user.
-    """
+    """Dry-run or execute the rollback plan associated with a PR."""
     log(f"/api/rollback pr={req.pr_number} action={req.action}")
 
     analysis = get_pr_analysis(req.pr_number)
