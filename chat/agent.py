@@ -7,6 +7,12 @@ Rate limits:
     routes through Google Gemini (free tier). The user never sees a
     rate-limit error on stage.
 
+Demo fast-path:
+    Before calling Groq, we check whether the message matches one of the
+    pre-authored demo responses in the RAG store. If it does, we return
+    that answer directly in under 500ms — no model call, no tool loop,
+    no rate limit. This is what makes Beat 3, 3.5, 4, and 5 fast on stage.
+
 Public API:
     chat(message, session_id, user_id, history, tools) -> dict
 """
@@ -34,6 +40,10 @@ from chat.memory import (
 
 # Multi-provider fallback chain. Routes Groq -> Google -> deterministic.
 from ai.multi_provider import call_ai
+
+# Demo-response fast-path. Returns a pre-authored answer if the query
+# matches a seeded demo document.
+from rag.retriever import check_demo_response
 
 
 logger = logging.getLogger(__name__)
@@ -385,6 +395,18 @@ async def chat(
     if _looks_like_orphan_followup(message, history):
         logger.info("Orphan follow-up detected — returning clarification")
         return {"response": _ORPHAN_REFUSAL, "tool_calls": []}
+
+    # 6.5. DEMO FAST-PATH — check the pre-authored RAG docs first.
+    # If the message matches a seeded demo response, return it directly.
+    # This bypasses the model entirely and answers in <500ms.
+    try:
+        demo_answer = check_demo_response(message)
+        if demo_answer:
+            logger.info("Demo fast-path hit — returning pre-authored answer")
+            return {"response": demo_answer, "tool_calls": ["demo_cache"]}
+    except Exception as exc:
+        # Never let the fast-path break the normal flow.
+        logger.warning("Demo fast-path check failed: %s", exc)
 
     # 7. Build messages
     if tools is None:
