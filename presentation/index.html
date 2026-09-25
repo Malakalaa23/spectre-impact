@@ -1,0 +1,2397 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>SPECTRE IMPACT — A Day Inside NilePay</title>
+<link rel="stylesheet" href="https://cdn.jsdelivr.net/npm/@fontsource/inter@5.0.8/index.css">
+<link rel="stylesheet" href="https://cdn.jsdelivr.net/npm/@fontsource/jetbrains-mono@5.0.8/index.css">
+<link rel="stylesheet" href="https://cdn.jsdelivr.net/npm/@fontsource/cairo@5.0.8/index.css">
+<style>
+:root {
+  --deep-navy: #0a1628;
+  --midnight-blue: #1a2a4a;
+  --cyan: #00d4ff;
+  --electric-blue: #0066ff;
+  --alert-red: #ff4444;
+  --gold: #f59e0b;
+  --success-green: #22c55e;
+  --warning-orange: #ff8800;
+  --ghost-white: #ffffff;
+  --muted-grey: #94a3b8;
+  --glass-bg: rgba(10, 22, 40, 0.7);
+  --glass-border: rgba(0, 212, 255, 0.15);
+}
+
+* { margin: 0; padding: 0; box-sizing: border-box; }
+
+html {
+  scroll-behavior: smooth;
+  scroll-snap-type: y mandatory;
+  overflow-y: scroll;
+  overflow-x: hidden;
+}
+
+body {
+  font-family: 'Inter', sans-serif;
+  background: var(--deep-navy);
+  color: var(--ghost-white);
+  overflow-x: hidden;
+}
+
+/* ===== BACKGROUND CANVAS ===== */
+#bg-canvas {
+  position: fixed;
+  top: 0; left: 0;
+  width: 100vw; height: 100vh;
+  z-index: 0;
+  pointer-events: none;
+}
+
+/* ===== GRADIENT OVERLAY ===== */
+.gradient-overlay {
+  position: fixed;
+  top: 0; left: 0;
+  width: 100vw; height: 100vh;
+  z-index: 1;
+  pointer-events: none;
+  background: radial-gradient(ellipse at 50% 50%, transparent 0%, var(--deep-navy) 70%);
+  animation: gradientPulse 8s ease-in-out infinite;
+}
+
+@keyframes gradientPulse {
+  0%, 100% { opacity: 0.3; }
+  50% { opacity: 0.6; }
+}
+
+/* ===== HEX GRID OVERLAY ===== */
+.hex-overlay {
+  position: fixed;
+  top: 0; left: 0;
+  width: 100vw; height: 100vh;
+  z-index: 1;
+  pointer-events: none;
+  opacity: 0.04;
+  background-image: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' width='60' height='52'%3E%3Cpath d='M30 0L60 15v22L30 52 0 37V15z' fill='none' stroke='%2300d4ff' stroke-width='0.5'/%3E%3C/svg%3E");
+  background-size: 60px 52px;
+  animation: hexShift 20s linear infinite;
+}
+
+@keyframes hexShift {
+  0% { transform: translate(0, 0); }
+  100% { transform: translate(60px, 52px); }
+}
+
+/* ===== PROGRESS BAR ===== */
+.progress-bar {
+  position: fixed;
+  top: 0; left: 0;
+  width: 0%;
+  height: 3px;
+  background: linear-gradient(90deg, var(--cyan), var(--electric-blue));
+  z-index: 1000;
+  transition: width 0.3s ease;
+  box-shadow: 0 0 10px var(--cyan), 0 0 20px rgba(0, 212, 255, 0.3);
+}
+
+/* ===== SPEAKER PANEL ===== */
+.speaker-panel {
+  position: fixed;
+  left: 20px;
+  top: 50%;
+  transform: translateY(-50%);
+  width: 180px;
+  z-index: 100;
+  background: var(--glass-bg);
+  backdrop-filter: blur(20px);
+  -webkit-backdrop-filter: blur(20px);
+  border: 1px solid var(--glass-border);
+  border-radius: 16px;
+  padding: 20px 16px;
+  transition: all 0.5s cubic-bezier(0.4, 0, 0.2, 1);
+  box-shadow: 0 0 30px rgba(0, 212, 255, 0.05), inset 0 0 30px rgba(0, 212, 255, 0.02);
+}
+
+.speaker-panel.hidden {
+  transform: translateY(-50%) translateX(-220px);
+  opacity: 0;
+  pointer-events: none;
+}
+
+.speaker-panel .label {
+  font-size: 0.6rem;
+  text-transform: uppercase;
+  letter-spacing: 2px;
+  color: var(--muted-grey);
+  margin-bottom: 4px;
+}
+
+.speaker-panel .divider {
+  height: 1px;
+  background: linear-gradient(90deg, var(--cyan), transparent);
+  margin: 6px 0 10px;
+}
+
+.speaker-panel .speaker-name {
+  font-size: 1.1rem;
+  font-weight: 700;
+  color: var(--cyan);
+  transition: all 0.4s ease;
+}
+
+.speaker-panel .speaker-role {
+  font-size: 0.7rem;
+  color: var(--muted-grey);
+  margin-top: 2px;
+}
+
+.speaker-panel .speaker-beat {
+  font-size: 0.65rem;
+  color: var(--gold);
+  margin-top: 6px;
+  font-family: 'JetBrains Mono', monospace;
+}
+
+.speaker-panel .next-section {
+  margin-top: 16px;
+  padding-top: 12px;
+  border-top: 1px solid rgba(255,255,255,0.05);
+}
+
+.speaker-panel .next-name {
+  font-size: 0.9rem;
+  font-weight: 600;
+  color: var(--ghost-white);
+  opacity: 0.7;
+}
+
+.speaker-panel .next-beat {
+  font-size: 0.6rem;
+  color: var(--muted-grey);
+  margin-top: 2px;
+}
+
+.speaker-panel .now-indicator {
+  display: inline-block;
+  width: 8px; height: 8px;
+  background: var(--cyan);
+  border-radius: 50%;
+  margin-right: 6px;
+  animation: pulse 2s ease-in-out infinite;
+  vertical-align: middle;
+}
+
+@keyframes pulse {
+  0%, 100% { box-shadow: 0 0 0 0 rgba(0, 212, 255, 0.4); }
+  50% { box-shadow: 0 0 0 6px rgba(0, 212, 255, 0); }
+}
+
+/* ===== NAVIGATION DOTS ===== */
+.nav-dots {
+  position: fixed;
+  right: 24px;
+  top: 50%;
+  transform: translateY(-50%);
+  z-index: 100;
+  display: flex;
+  flex-direction: column;
+  gap: 12px;
+}
+
+.nav-dot {
+  width: 12px; height: 12px;
+  border-radius: 50%;
+  border: 2px solid var(--muted-grey);
+  background: transparent;
+  cursor: pointer;
+  transition: all 0.3s ease;
+  position: relative;
+}
+
+.nav-dot:hover {
+  border-color: var(--cyan);
+  transform: scale(1.3);
+}
+
+.nav-dot.active {
+  border-color: var(--cyan);
+  background: var(--cyan);
+  box-shadow: 0 0 10px var(--cyan);
+}
+
+.nav-dot .dot-label {
+  position: absolute;
+  right: 22px;
+  top: 50%;
+  transform: translateY(-50%);
+  font-size: 0.6rem;
+  color: var(--muted-grey);
+  white-space: nowrap;
+  opacity: 0;
+  transition: opacity 0.3s ease;
+  pointer-events: none;
+}
+
+.nav-dot:hover .dot-label {
+  opacity: 1;
+}
+
+/* ===== BOTTOM NAVIGATION ===== */
+.bottom-nav {
+  position: fixed;
+  bottom: 20px;
+  left: 50%;
+  transform: translateX(-50%);
+  z-index: 100;
+  display: flex;
+  align-items: center;
+  gap: 16px;
+  background: var(--glass-bg);
+  backdrop-filter: blur(20px);
+  -webkit-backdrop-filter: blur(20px);
+  border: 1px solid var(--glass-border);
+  border-radius: 30px;
+  padding: 10px 24px;
+}
+
+.bottom-nav button {
+  background: none;
+  border: 1px solid var(--glass-border);
+  color: var(--ghost-white);
+  padding: 6px 14px;
+  border-radius: 20px;
+  cursor: pointer;
+  font-family: 'Inter', sans-serif;
+  font-size: 0.75rem;
+  transition: all 0.3s ease;
+}
+
+.bottom-nav button:hover {
+  background: rgba(0, 212, 255, 0.1);
+  border-color: var(--cyan);
+  color: var(--cyan);
+}
+
+.beat-counter {
+  font-family: 'JetBrains Mono', monospace;
+  font-size: 0.8rem;
+  color: var(--cyan);
+}
+
+.autoplay-toggle {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  font-size: 0.65rem;
+  color: var(--muted-grey);
+  cursor: pointer;
+}
+
+.autoplay-toggle input {
+  accent-color: var(--cyan);
+}
+
+/* ===== BEAT SECTIONS ===== */
+.beat {
+  min-height: 100vh;
+  scroll-snap-align: start;
+  position: relative;
+  z-index: 10;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  padding: 60px 220px 80px;
+  overflow: hidden;
+}
+
+.beat-content {
+  max-width: 900px;
+  width: 100%;
+  position: relative;
+}
+
+/* ===== REVEAL ANIMATIONS ===== */
+.reveal {
+  opacity: 0;
+  transform: translateY(40px);
+  transition: all 0.8s cubic-bezier(0.4, 0, 0.2, 1);
+}
+
+.reveal.visible {
+  opacity: 1;
+  transform: translateY(0);
+}
+
+.reveal-left {
+  opacity: 0;
+  transform: translateX(-60px);
+  transition: all 0.8s cubic-bezier(0.4, 0, 0.2, 1);
+}
+
+.reveal-left.visible {
+  opacity: 1;
+  transform: translateX(0);
+}
+
+.reveal-right {
+  opacity: 0;
+  transform: translateX(60px);
+  transition: all 0.8s cubic-bezier(0.4, 0, 0.2, 1);
+}
+
+.reveal-right.visible {
+  opacity: 1;
+  transform: translateX(0);
+}
+
+.reveal-scale {
+  opacity: 0;
+  transform: scale(0.8);
+  transition: all 0.8s cubic-bezier(0.4, 0, 0.2, 1);
+}
+
+.reveal-scale.visible {
+  opacity: 1;
+  transform: scale(1);
+}
+
+/* ===== TYPOGRAPHY ===== */
+.headline {
+  font-size: 4rem;
+  font-weight: 900;
+  line-height: 1.1;
+  margin-bottom: 1.5rem;
+  letter-spacing: -1px;
+}
+
+.subheadline {
+  font-size: 2rem;
+  font-weight: 700;
+  margin-bottom: 1rem;
+}
+
+.body-text {
+  font-size: 1.15rem;
+  line-height: 1.8;
+  color: var(--muted-grey);
+  max-width: 700px;
+}
+
+.code-text {
+  font-family: 'JetBrains Mono', monospace;
+  font-size: 0.9rem;
+}
+
+.arabic-text {
+  font-family: 'Cairo', sans-serif;
+  direction: rtl;
+  font-size: 1.3rem;
+  line-height: 2;
+}
+
+/* ===== GLASS CARD ===== */
+.glass-card {
+  background: var(--glass-bg);
+  backdrop-filter: blur(20px);
+  -webkit-backdrop-filter: blur(20px);
+  border: 1px solid var(--glass-border);
+  border-radius: 16px;
+  padding: 24px;
+  margin: 16px 0;
+}
+
+/* ===== BEAT 1 — PREMISE ===== */
+#beat-1 .headline {
+  background: linear-gradient(135deg, var(--ghost-white), var(--cyan));
+  -webkit-background-clip: text;
+  -webkit-text-fill-color: transparent;
+  background-clip: text;
+}
+
+.split-screen {
+  display: grid;
+  grid-template-columns: 1fr 1fr;
+  gap: 30px;
+  margin-top: 30px;
+}
+
+.split-left, .split-right {
+  padding: 20px;
+  border-radius: 12px;
+}
+
+.split-left {
+  background: rgba(0, 212, 255, 0.05);
+  border: 1px solid rgba(0, 212, 255, 0.2);
+}
+
+.split-right {
+  background: rgba(255, 68, 68, 0.05);
+  border: 1px solid rgba(255, 68, 68, 0.2);
+}
+
+.stat-grid {
+  display: grid;
+  grid-template-columns: 1fr 1fr;
+  gap: 16px;
+  margin-top: 24px;
+}
+
+.stat-card {
+  background: rgba(0, 212, 255, 0.05);
+  border: 1px solid rgba(0, 212, 255, 0.15);
+  border-radius: 12px;
+  padding: 16px;
+  text-align: center;
+}
+
+.stat-number {
+  font-size: 2rem;
+  font-weight: 900;
+  color: var(--cyan);
+  font-family: 'JetBrains Mono', monospace;
+}
+
+.stat-label {
+  font-size: 0.75rem;
+  color: var(--muted-grey);
+  margin-top: 4px;
+}
+
+/* ===== BEAT 2 — INCIDENT ===== */
+#beat-2 .headline {
+  color: var(--alert-red);
+  text-shadow: 0 0 40px rgba(255, 68, 68, 0.3);
+}
+
+.clock-display {
+  font-family: 'JetBrains Mono', monospace;
+  font-size: 6rem;
+  font-weight: 900;
+  color: var(--alert-red);
+  text-shadow: 0 0 60px rgba(255, 68, 68, 0.5);
+  animation: clockPulse 1s ease-in-out infinite;
+  text-align: center;
+  margin: 20px 0;
+}
+
+@keyframes clockPulse {
+  0%, 100% { opacity: 1; }
+  50% { opacity: 0.7; }
+}
+
+.money-bleed {
+  font-family: 'JetBrains Mono', monospace;
+  font-size: 2.5rem;
+  color: var(--alert-red);
+  text-align: center;
+  animation: moneyCount 0.1s steps(1) infinite;
+}
+
+.incident-timeline {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  gap: 30px;
+  margin: 30px 0;
+}
+
+.timeline-item {
+  text-align: center;
+  padding: 16px;
+  border-radius: 12px;
+  background: rgba(255, 68, 68, 0.05);
+  border: 1px solid rgba(255, 68, 68, 0.2);
+}
+
+.timeline-vs {
+  font-size: 1.5rem;
+  font-weight: 900;
+  color: var(--muted-grey);
+}
+
+/* ===== BEAT 3 — ARABIC DEMO ===== */
+#beat-3 .headline {
+  background: linear-gradient(135deg, var(--gold), var(--cyan));
+  -webkit-background-clip: text;
+  -webkit-text-fill-color: transparent;
+  background-clip: text;
+}
+
+.chat-interface {
+  background: rgba(0, 0, 0, 0.4);
+  border: 1px solid var(--glass-border);
+  border-radius: 16px;
+  padding: 20px;
+  margin: 20px 0;
+  max-width: 600px;
+}
+
+.chat-message {
+  margin: 12px 0;
+  padding: 12px 16px;
+  border-radius: 12px;
+  max-width: 85%;
+  animation: chatIn 0.5s ease forwards;
+}
+
+.chat-user {
+  background: rgba(0, 212, 255, 0.1);
+  border: 1px solid rgba(0, 212, 255, 0.2);
+  margin-left: auto;
+  text-align: right;
+}
+
+.chat-lya {
+  background: rgba(245, 158, 11, 0.1);
+  border: 1px solid rgba(245, 158, 11, 0.2);
+}
+
+.chat-lya .lya-badge {
+  font-size: 0.6rem;
+  color: var(--gold);
+  text-transform: uppercase;
+  letter-spacing: 1px;
+  margin-bottom: 4px;
+}
+
+@keyframes chatIn {
+  from { opacity: 0; transform: translateY(10px); }
+  to { opacity: 1; transform: translateY(0); }
+}
+
+.network-graph {
+  position: relative;
+  width: 100%;
+  height: 200px;
+  margin: 20px 0;
+}
+
+.graph-node {
+  position: absolute;
+  width: 40px; height: 40px;
+  border-radius: 50%;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  font-size: 0.5rem;
+  font-weight: 700;
+  transition: all 0.5s ease;
+}
+
+.graph-node.affected {
+  background: rgba(255, 68, 68, 0.2);
+  border: 2px solid var(--alert-red);
+  color: var(--alert-red);
+  animation: nodePulse 2s ease-in-out infinite;
+}
+
+.graph-node.safe {
+  background: rgba(0, 212, 255, 0.1);
+  border: 2px solid var(--cyan);
+  color: var(--cyan);
+}
+
+.graph-node.customer-facing {
+  background: rgba(245, 158, 11, 0.2);
+  border: 2px solid var(--gold);
+  color: var(--gold);
+}
+
+@keyframes nodePulse {
+  0%, 100% { box-shadow: 0 0 0 0 rgba(255, 68, 68, 0.3); }
+  50% { box-shadow: 0 0 0 8px rgba(255, 68, 68, 0); }
+}
+
+/* ===== BEAT 4 — CTO MODE ===== */
+#beat-4 .headline {
+  background: linear-gradient(135deg, var(--gold), #fff);
+  -webkit-background-clip: text;
+  -webkit-text-fill-color: transparent;
+  background-clip: text;
+}
+
+.cto-badge {
+  display: inline-flex;
+  align-items: center;
+  gap: 8px;
+  background: rgba(245, 158, 11, 0.1);
+  border: 1px solid rgba(245, 158, 11, 0.3);
+  padding: 8px 16px;
+  border-radius: 8px;
+  font-size: 0.8rem;
+  color: var(--gold);
+  font-weight: 700;
+  text-transform: uppercase;
+  letter-spacing: 2px;
+  margin-bottom: 20px;
+  animation: ctoPulse 3s ease-in-out infinite;
+}
+
+@keyframes ctoPulse {
+  0%, 100% { box-shadow: 0 0 20px rgba(245, 158, 11, 0.1); }
+  50% { box-shadow: 0 0 40px rgba(245, 158, 11, 0.2); }
+}
+
+.business-impact {
+  display: grid;
+  grid-template-columns: repeat(3, 1fr);
+  gap: 16px;
+  margin: 24px 0;
+}
+
+.impact-card {
+  background: rgba(245, 158, 11, 0.05);
+  border: 1px solid rgba(245, 158, 11, 0.2);
+  border-radius: 12px;
+  padding: 20px;
+  text-align: center;
+}
+
+.impact-value {
+  font-size: 2.2rem;
+  font-weight: 900;
+  color: var(--gold);
+  font-family: 'JetBrains Mono', monospace;
+}
+
+.impact-label {
+  font-size: 0.75rem;
+  color: var(--muted-grey);
+  margin-top: 4px;
+}
+
+/* ===== BEAT 5 — TRUST LAYER ===== */
+#beat-5 .headline {
+  background: linear-gradient(135deg, var(--success-green), var(--cyan));
+  -webkit-background-clip: text;
+  -webkit-text-fill-color: transparent;
+  background-clip: text;
+}
+
+.trust-features {
+  display: grid;
+  grid-template-columns: 1fr 1fr;
+  gap: 16px;
+  margin: 24px 0;
+}
+
+.trust-item {
+  display: flex;
+  align-items: flex-start;
+  gap: 12px;
+  padding: 16px;
+  background: rgba(34, 197, 94, 0.05);
+  border: 1px solid rgba(34, 197, 94, 0.15);
+  border-radius: 12px;
+}
+
+.trust-icon {
+  font-size: 1.5rem;
+  flex-shrink: 0;
+}
+
+.trust-text {
+  font-size: 0.85rem;
+  color: var(--muted-grey);
+  line-height: 1.5;
+}
+
+.trust-text strong {
+  color: var(--ghost-white);
+}
+
+.pr-comment-mock {
+  background: #0d1117;
+  border: 1px solid #30363d;
+  border-radius: 8px;
+  padding: 16px;
+  margin: 20px 0;
+  font-family: 'JetBrains Mono', monospace;
+  font-size: 0.8rem;
+}
+
+.pr-header {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  margin-bottom: 12px;
+  padding-bottom: 12px;
+  border-bottom: 1px solid #30363d;
+}
+
+.pr-badge {
+  padding: 2px 8px;
+  border-radius: 4px;
+  font-size: 0.65rem;
+  font-weight: 700;
+}
+
+.pr-badge.severity-high { background: rgba(255, 68, 68, 0.2); color: var(--alert-red); }
+.pr-badge.blast { background: rgba(0, 212, 255, 0.2); color: var(--cyan); }
+.pr-badge.rollback { background: rgba(34, 197, 94, 0.2); color: var(--success-green); }
+
+/* ===== BEAT 6a — TECHNICAL DEPTH ===== */
+#beat-6a .headline {
+  background: linear-gradient(135deg, var(--cyan), var(--electric-blue));
+  -webkit-background-clip: text;
+  -webkit-text-fill-color: transparent;
+  background-clip: text;
+}
+
+.tech-stack {
+  display: flex;
+  flex-direction: column;
+  gap: 12px;
+  margin: 24px 0;
+}
+
+.tech-item {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  padding: 12px 16px;
+  background: rgba(0, 212, 255, 0.03);
+  border: 1px solid rgba(0, 212, 255, 0.1);
+  border-radius: 10px;
+  font-size: 0.9rem;
+}
+
+.tech-status {
+  padding: 3px 10px;
+  border-radius: 4px;
+  font-size: 0.65rem;
+  font-weight: 700;
+  text-transform: uppercase;
+  letter-spacing: 1px;
+}
+
+.tech-status.blocked { background: rgba(255, 68, 68, 0.2); color: var(--alert-red); }
+.tech-status.active { background: rgba(34, 197, 94, 0.2); color: var(--success-green); }
+.tech-status.secure { background: rgba(0, 212, 255, 0.2); color: var(--cyan); }
+
+.provider-chain {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  gap: 12px;
+  margin: 24px 0;
+  flex-wrap: wrap;
+}
+
+.provider-node {
+  padding: 10px 18px;
+  border-radius: 8px;
+  font-family: 'JetBrains Mono', monospace;
+  font-size: 0.8rem;
+  font-weight: 700;
+  border: 1px solid;
+  transition: all 0.3s ease;
+}
+
+.provider-node.groq { border-color: var(--gold); color: var(--gold); background: rgba(245, 158, 11, 0.05); }
+.provider-node.openai { border-color: var(--success-green); color: var(--success-green); background: rgba(34, 197, 94, 0.05); }
+.provider-node.anthropic { border-color: var(--electric-blue); color: var(--electric-blue); background: rgba(0, 102, 255, 0.05); }
+.provider-node.fallback { border-color: var(--cyan); color: var(--cyan); background: rgba(0, 212, 255, 0.05); }
+
+.chain-arrow {
+  color: var(--muted-grey);
+  font-size: 1.2rem;
+}
+
+/* ===== BEAT 6b — BUSINESS CASE ===== */
+#beat-6b .headline {
+  background: linear-gradient(135deg, var(--success-green), var(--gold));
+  -webkit-background-clip: text;
+  -webkit-text-fill-color: transparent;
+  background-clip: text;
+}
+
+.three-pillars {
+  display: grid;
+  grid-template-columns: repeat(3, 1fr);
+  gap: 20px;
+  margin: 24px 0;
+}
+
+.pillar {
+  text-align: center;
+  padding: 24px 16px;
+  background: var(--glass-bg);
+  border: 1px solid var(--glass-border);
+  border-radius: 16px;
+  transition: all 0.3s ease;
+}
+
+.pillar:hover {
+  transform: translateY(-4px);
+  box-shadow: 0 10px 40px rgba(0, 212, 255, 0.1);
+}
+
+.pillar-icon {
+  font-size: 2.5rem;
+  margin-bottom: 12px;
+}
+
+.pillar-title {
+  font-size: 1.1rem;
+  font-weight: 700;
+  margin-bottom: 8px;
+}
+
+.pillar-desc {
+  font-size: 0.8rem;
+  color: var(--muted-grey);
+  line-height: 1.5;
+}
+
+.market-stats {
+  display: grid;
+  grid-template-columns: repeat(3, 1fr);
+  gap: 16px;
+  margin: 24px 0;
+}
+
+.market-stat {
+  text-align: center;
+  padding: 16px;
+  background: rgba(245, 158, 11, 0.05);
+  border: 1px solid rgba(245, 158, 11, 0.15);
+  border-radius: 12px;
+}
+
+.market-value {
+  font-size: 1.8rem;
+  font-weight: 900;
+  color: var(--gold);
+  font-family: 'JetBrains Mono', monospace;
+}
+
+.market-label {
+  font-size: 0.7rem;
+  color: var(--muted-grey);
+  margin-top: 4px;
+}
+
+.comparison-grid {
+  display: grid;
+  grid-template-columns: 1fr 1fr;
+  gap: 20px;
+  margin: 24px 0;
+}
+
+.comparison-item {
+  padding: 20px;
+  border-radius: 12px;
+  text-align: center;
+}
+
+.comparison-item.them {
+  background: rgba(148, 163, 184, 0.05);
+  border: 1px solid rgba(148, 163, 184, 0.2);
+}
+
+.comparison-item.us {
+  background: rgba(0, 212, 255, 0.05);
+  border: 1px solid rgba(0, 212, 255, 0.2);
+}
+
+/* ===== BEAT 7 — CLOSE ===== */
+#beat-7 .headline {
+  background: linear-gradient(135deg, var(--cyan), var(--ghost-white), var(--gold));
+  -webkit-background-clip: text;
+  -webkit-text-fill-color: transparent;
+  background-clip: text;
+}
+
+.roadmap-timeline {
+  position: relative;
+  padding-left: 30px;
+  margin: 24px 0;
+}
+
+.roadmap-timeline::before {
+  content: '';
+  position: absolute;
+  left: 8px;
+  top: 0;
+  bottom: 0;
+  width: 2px;
+  background: linear-gradient(180deg, var(--cyan), var(--gold));
+}
+
+.roadmap-item {
+  position: relative;
+  margin: 16px 0;
+  padding: 12px 16px;
+  background: rgba(0, 212, 255, 0.03);
+  border: 1px solid rgba(0, 212, 255, 0.1);
+  border-radius: 10px;
+}
+
+.roadmap-item::before {
+  content: '';
+  position: absolute;
+  left: -26px;
+  top: 50%;
+  transform: translateY(-50%);
+  width: 12px; height: 12px;
+  border-radius: 50%;
+  background: var(--cyan);
+  border: 2px solid var(--deep-navy);
+}
+
+.qr-section {
+  text-align: center;
+  margin: 40px 0;
+}
+
+.qr-code {
+  width: 180px;
+  height: 180px;
+  margin: 0 auto;
+  background: var(--ghost-white);
+  border-radius: 12px;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  animation: qrPulse 3s ease-in-out infinite;
+  position: relative;
+  overflow: hidden;
+}
+
+.qr-code svg {
+  width: 150px;
+  height: 150px;
+}
+
+@keyframes qrPulse {
+  0%, 100% { box-shadow: 0 0 20px rgba(0, 212, 255, 0.2); }
+  50% { box-shadow: 0 0 60px rgba(0, 212, 255, 0.4), 0 0 100px rgba(0, 212, 255, 0.1); }
+}
+
+.team-counter {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  gap: 30px;
+  margin: 24px 0;
+}
+
+.team-stat {
+  text-align: center;
+}
+
+.team-stat-value {
+  font-size: 2.5rem;
+  font-weight: 900;
+  color: var(--cyan);
+  font-family: 'JetBrains Mono', monospace;
+}
+
+.team-stat-label {
+  font-size: 0.75rem;
+  color: var(--muted-grey);
+}
+
+/* ===== RECOVERY CARD ===== */
+.recovery-card {
+  position: fixed;
+  top: 50%;
+  left: 50%;
+  transform: translate(-50%, -50%) scale(0.9);
+  z-index: 2000;
+  background: rgba(10, 22, 40, 0.95);
+  backdrop-filter: blur(30px);
+  -webkit-backdrop-filter: blur(30px);
+  border: 1px solid var(--gold);
+  border-radius: 20px;
+  padding: 30px;
+  max-width: 500px;
+  width: 90%;
+  opacity: 0;
+  pointer-events: none;
+  transition: all 0.4s cubic-bezier(0.4, 0, 0.2, 1);
+}
+
+.recovery-card.visible {
+  opacity: 1;
+  transform: translate(-50%, -50%) scale(1);
+  pointer-events: all;
+}
+
+.recovery-card h3 {
+  color: var(--gold);
+  font-size: 1.2rem;
+  margin-bottom: 16px;
+  display: flex;
+  align-items: center;
+  gap: 8px;
+}
+
+.recovery-table {
+  width: 100%;
+  border-collapse: collapse;
+}
+
+.recovery-table th {
+  text-align: left;
+  padding: 8px;
+  font-size: 0.7rem;
+  text-transform: uppercase;
+  letter-spacing: 1px;
+  color: var(--muted-grey);
+  border-bottom: 1px solid rgba(255,255,255,0.1);
+}
+
+.recovery-table td {
+  padding: 8px;
+  font-size: 0.8rem;
+  border-bottom: 1px solid rgba(255,255,255,0.03);
+  vertical-align: top;
+}
+
+.recovery-table td:first-child {
+  color: var(--alert-red);
+  font-weight: 600;
+  width: 40%;
+}
+
+.recovery-table td:last-child {
+  color: var(--muted-grey);
+}
+
+/* ===== GHOST ICON SVG ===== */
+.ghost-icon {
+  display: inline-block;
+  width: 60px;
+  height: 60px;
+  animation: ghostFloat 3s ease-in-out infinite;
+}
+
+@keyframes ghostFloat {
+  0%, 100% { transform: translateY(0); }
+  50% { transform: translateY(-10px); }
+}
+
+/* ===== TYPEWRITER ===== */
+.typewriter {
+  overflow: hidden;
+  border-right: 2px solid var(--cyan);
+  white-space: nowrap;
+  animation: typing 3s steps(40) forwards, blink 0.8s step-end infinite;
+  width: 0;
+}
+
+.typewriter.active {
+  width: 100%;
+}
+
+@keyframes typing {
+  from { width: 0; }
+  to { width: 100%; }
+}
+
+@keyframes blink {
+  50% { border-color: transparent; }
+}
+
+/* ===== SCAN LINE EFFECT ===== */
+.scan-line {
+  position: absolute;
+  top: 0; left: 0;
+  width: 100%;
+  height: 2px;
+  background: linear-gradient(90deg, transparent, var(--cyan), transparent);
+  animation: scanMove 4s linear infinite;
+  opacity: 0.3;
+  pointer-events: none;
+}
+
+@keyframes scanMove {
+  0% { top: 0; }
+  100% { top: 100%; }
+}
+
+/* ===== FEATURE BADGE ===== */
+.feature-badge {
+  display: inline-flex;
+  align-items: center;
+  gap: 8px;
+  padding: 8px 16px;
+  border-radius: 20px;
+  font-size: 0.8rem;
+  font-weight: 700;
+  margin: 8px 0;
+}
+
+.feature-badge.cyan { background: rgba(0, 212, 255, 0.1); border: 1px solid rgba(0, 212, 255, 0.3); color: var(--cyan); }
+.feature-badge.gold { background: rgba(245, 158, 11, 0.1); border: 1px solid rgba(245, 158, 11, 0.3); color: var(--gold); }
+.feature-badge.green { background: rgba(34, 197, 94, 0.1); border: 1px solid rgba(34, 197, 94, 0.3); color: var(--success-green); }
+
+/* ===== TRANSITION OVERLAY ===== */
+.transition-overlay {
+  position: fixed;
+  top: 0; left: 0;
+  width: 100vw; height: 100vh;
+  z-index: 500;
+  pointer-events: none;
+  opacity: 0;
+  transition: opacity 0.5s ease;
+}
+
+.transition-overlay.active {
+  opacity: 1;
+}
+
+/* ===== PER-BEAT BACKGROUND EFFECTS ===== */
+.beat-bg-effect {
+  position: absolute;
+  top: 0; left: 0;
+  width: 100%; height: 100%;
+  pointer-events: none;
+  z-index: -1;
+}
+
+/* Beat 2 red pulse */
+#beat-2 .beat-bg-effect {
+  background: radial-gradient(ellipse at center, transparent 50%, rgba(255, 68, 68, 0.08) 100%);
+  animation: redPulse 2s ease-in-out infinite;
+}
+
+@keyframes redPulse {
+  0%, 100% { opacity: 0.5; }
+  50% { opacity: 1; }
+}
+
+/* Beat 3 sunrise */
+#beat-3 .beat-bg-effect {
+  background: linear-gradient(180deg, rgba(245, 158, 11, 0.05) 0%, rgba(0, 212, 255, 0.03) 50%, transparent 100%);
+  animation: sunriseShift 6s ease-in-out infinite;
+}
+
+@keyframes sunriseShift {
+  0%, 100% { opacity: 0.5; }
+  50% { opacity: 1; }
+}
+
+/* Beat 4 gold ambiance */
+#beat-4 .beat-bg-effect {
+  background: radial-gradient(ellipse at 70% 30%, rgba(245, 158, 11, 0.06) 0%, transparent 60%);
+}
+
+/* Beat 5 scan line */
+#beat-5 .beat-bg-effect::after {
+  content: '';
+  position: absolute;
+  top: 0; left: 0;
+  width: 100%; height: 3px;
+  background: linear-gradient(90deg, transparent, var(--success-green), transparent);
+  animation: scanMove 3s linear infinite;
+  opacity: 0.4;
+}
+
+/* Beat 6a code rain */
+#beat-6a .beat-bg-effect {
+  background: linear-gradient(180deg, rgba(0, 212, 255, 0.02) 0%, transparent 100%);
+}
+
+/* Beat 7 stars */
+#beat-7 .beat-bg-effect {
+  background: radial-gradient(ellipse at 50% 80%, rgba(0, 212, 255, 0.05) 0%, transparent 50%);
+}
+
+/* ===== MOBILE RESPONSIVE ===== */
+@media (max-width: 1024px) {
+  .beat { padding: 60px 100px 80px; }
+  .headline { font-size: 3rem; }
+}
+
+@media (max-width: 768px) {
+  .speaker-panel {
+    width: auto;
+    left: 10px;
+    top: 10px;
+    transform: none;
+    padding: 10px 14px;
+    border-radius: 12px;
+  }
+  
+  .speaker-panel.hidden {
+    transform: translateX(-200px);
+  }
+  
+  .speaker-panel .next-section { display: none; }
+  
+  .beat {
+    padding: 80px 20px 100px;
+  }
+  
+  .headline { font-size: 2.2rem; }
+  .subheadline { font-size: 1.4rem; }
+  
+  .split-screen,
+  .trust-features,
+  .three-pillars,
+  .business-impact,
+  .market-stats,
+  .comparison-grid,
+  .stat-grid {
+    grid-template-columns: 1fr;
+  }
+  
+  .nav-dots { right: 10px; }
+  
+  .bottom-nav {
+    width: calc(100% - 20px);
+    padding: 8px 16px;
+    gap: 8px;
+  }
+  
+  .clock-display { font-size: 3.5rem; }
+  
+  .provider-chain { flex-direction: column; }
+  .chain-arrow { transform: rotate(90deg); }
+}
+
+/* ===== CHECKBOX LIST ===== */
+.checklist {
+  list-style: none;
+  margin: 16px 0;
+}
+
+.checklist li {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  padding: 8px 0;
+  font-size: 0.9rem;
+  color: var(--muted-grey);
+  border-bottom: 1px solid rgba(255,255,255,0.03);
+}
+
+.checklist li .check {
+  width: 20px; height: 20px;
+  border-radius: 4px;
+  border: 2px solid var(--success-green);
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  color: var(--success-green);
+  font-size: 0.7rem;
+  flex-shrink: 0;
+}
+
+/* ===== MODE CARDS ===== */
+.mode-grid {
+  display: grid;
+  grid-template-columns: repeat(4, 1fr);
+  gap: 12px;
+  margin: 20px 0;
+}
+
+.mode-card {
+  text-align: center;
+  padding: 16px 8px;
+  border-radius: 12px;
+  background: var(--glass-bg);
+  border: 1px solid var(--glass-border);
+  transition: all 0.3s ease;
+}
+
+.mode-card:hover {
+  transform: translateY(-3px);
+}
+
+.mode-icon { font-size: 1.8rem; margin-bottom: 8px; }
+.mode-name { font-size: 0.75rem; font-weight: 700; color: var(--cyan); }
+
+@media (max-width: 768px) {
+  .mode-grid { grid-template-columns: 1fr 1fr; }
+}
+
+/* ===== QUOTE STYLE ===== */
+.quote {
+  font-size: 1.3rem;
+  font-style: italic;
+  color: var(--ghost-white);
+  border-left: 3px solid var(--cyan);
+  padding-left: 20px;
+  margin: 20px 0;
+  line-height: 1.6;
+}
+
+.quote.red { border-color: var(--alert-red); }
+.quote.gold { border-color: var(--gold); }
+
+/* ===== INLINE HIGHLIGHT ===== */
+.hl-cyan { color: var(--cyan); font-weight: 700; }
+.hl-red { color: var(--alert-red); font-weight: 700; }
+.hl-gold { color: var(--gold); font-weight: 700; }
+.hl-green { color: var(--success-green); font-weight: 700; }
+
+/* ===== HANDOFF BADGE ===== */
+.handoff {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  padding: 4px 12px;
+  background: rgba(0, 212, 255, 0.1);
+  border: 1px solid rgba(0, 212, 255, 0.2);
+  border-radius: 6px;
+  font-size: 0.7rem;
+  color: var(--cyan);
+  margin-top: 12px;
+}
+
+/* ===== CODE BLOCK ===== */
+.code-block {
+  background: #0d1117;
+  border: 1px solid #30363d;
+  border-radius: 8px;
+  padding: 16px;
+  font-family: 'JetBrains Mono', monospace;
+  font-size: 0.8rem;
+  color: var(--cyan);
+  overflow-x: auto;
+  margin: 12px 0;
+}
+
+/* ===== ANIMATED COUNTER ===== */
+.counter {
+  font-family: 'JetBrains Mono', monospace;
+  font-weight: 900;
+}
+</style>
+</head>
+<body>
+
+<!-- Background Canvas -->
+<canvas id="bg-canvas"></canvas>
+<div class="gradient-overlay"></div>
+<div class="hex-overlay"></div>
+
+<!-- Progress Bar -->
+<div class="progress-bar" id="progressBar"></div>
+
+<!-- Speaker Panel -->
+<div class="speaker-panel" id="speakerPanel">
+  <div class="label"><span class="now-indicator"></span>Now Speaking</div>
+  <div class="divider"></div>
+  <div class="speaker-name" id="currentSpeaker">Malak</div>
+  <div class="speaker-role" id="currentRole">AI Systems Engineer</div>
+  <div class="speaker-beat" id="currentBeat">Beat 1 — Premise</div>
+  
+  <div class="next-section">
+    <div class="label">Next Up</div>
+    <div class="divider"></div>
+    <div class="next-name" id="nextSpeaker">Ahmed</div>
+    <div class="next-beat" id="nextBeat">Beat 2 — Incident</div>
+  </div>
+</div>
+
+<!-- Navigation Dots -->
+<div class="nav-dots" id="navDots"></div>
+
+<!-- Recovery Card -->
+<div class="recovery-card" id="recoveryCard">
+  <h3>🛟 Recovery Card</h3>
+  <table class="recovery-table">
+    <thead>
+      <tr><th>If This Happens</th><th>Do This</th></tr>
+    </thead>
+    <tbody>
+      <tr><td>WiFi dies</td><td>Merna switches to backup video. Malak narrates.</td></tr>
+      <tr><td>Chat slow</td><td>Merna keeps talking. 15s narration. Lya finishes.</td></tr>
+      <tr><td>STT fails</td><td>Merna types query. Pre-recorded voice plays.</td></tr>
+      <tr><td>Lya wrong</td><td>"Let me rephrase." Rephrase. Move on.</td></tr>
+      <tr><td>GitHub comment missing</td><td>"Posts within 30s. Let me refresh."</td></tr>
+      <tr><td>Forgot a line</td><td>Pause. Look at slide. Breathe. Continue.</td></tr>
+    </tbody>
+  </table>
+  <p style="margin-top:16px;font-size:0.7rem;color:var(--muted-grey);">Press <kbd style="background:rgba(255,255,255,0.1);padding:2px 6px;border-radius:4px;">R</kbd> to close</p>
+</div>
+
+<!-- ===== BEAT 1 — THE PREMISE ===== -->
+<section class="beat" id="beat-1" data-beat="1">
+  <div class="beat-bg-effect"></div>
+  <div class="beat-content">
+    <div class="reveal" style="transition-delay: 0.1s">
+      <svg class="ghost-icon" viewBox="0 0 100 100" fill="none">
+        <path d="M50 10C30 10 20 25 20 45V75L30 65L40 75L50 65L60 75L70 65L80 75V45C80 25 70 10 50 10Z" fill="rgba(0,212,255,0.15)" stroke="var(--cyan)" stroke-width="2"/>
+        <circle cx="38" cy="40" r="5" fill="var(--cyan)"/>
+        <circle cx="62" cy="40" r="5" fill="var(--cyan)"/>
+        <path d="M40 55Q50 62 60 55" stroke="var(--cyan)" stroke-width="2" fill="none" stroke-linecap="round"/>
+      </svg>
+    </div>
+    
+    <h1 class="headline reveal" style="transition-delay: 0.2s">SPECTRE IMPACT</h1>
+    <p class="subheadline reveal" style="transition-delay: 0.3s; color: var(--muted-grey);">A Day Inside NilePay</p>
+    
+    <div class="split-screen">
+      <div class="split-left reveal-left" style="transition-delay: 0.5s">
+        <h3 style="color: var(--cyan); font-size: 0.9rem; margin-bottom: 12px;">🔧 THE BUILDING</h3>
+        <p class="body-text" style="font-size: 0.95rem;">Where you see the code, the architecture, the tests.<br><em style="color: var(--cyan);">That's how we built it.</em></p>
+        <div class="code-block" style="margin-top: 12px; font-size: 0.7rem;">
+          <span style="color: var(--success-green);">✓</span> 8 microservices<br>
+          <span style="color: var(--success-green);">✓</span> Terraform IaC<br>
+          <span style="color: var(--success-green);">✓</span> CI/CD pipelines<br>
+          <span style="color: var(--success-green);">✓</span> 12 engineers
+        </div>
+      </div>
+      <div class="split-right reveal-right" style="transition-delay: 0.6s">
+        <h3 style="color: var(--alert-red); font-size: 0.9rem; margin-bottom: 12px;">🏢 THE COMPANY</h3>
+        <p class="body-text" style="font-size: 0.95rem;">Where you see the pager at <span class="hl-red">2:47 AM</span>, the CTO's revenue worries, the <span class="hl-red">$47,000</span> loss.<br><em style="color: var(--alert-red);">That's how you'll use it.</em></p>
+        <div style="margin-top: 12px; font-family: 'JetBrains Mono', monospace; font-size: 0.75rem; color: var(--alert-red);">
+          ⚠️ Pager: 2:47 AM<br>
+          💸 Loss: $2,800/min<br>
+          📉 Downtime: 4 hours
+        </div>
+      </div>
+    </div>
+    
+    <div class="stat-grid">
+      <div class="stat-card reveal" style="transition-delay: 0.8s">
+        <div class="stat-number counter" data-target="12">0</div>
+        <div class="stat-label">Engineers</div>
+      </div>
+      <div class="stat-card reveal" style="transition-delay: 0.9s">
+        <div class="stat-number counter" data-target="8">0</div>
+        <div class="stat-label">Microservices</div>
+      </div>
+      <div class="stat-card reveal" style="transition-delay: 1.0s">
+        <div class="stat-number counter" data-target="180000" data-format="comma">0</div>
+        <div class="stat-label">Users</div>
+      </div>
+      <div class="stat-card reveal" style="transition-delay: 1.1s">
+        <div class="stat-number" style="color: var(--alert-red);">$<span class="counter" data-target="2800" data-format="comma">0</span></div>
+        <div class="stat-label">Per Minute Cost</div>
+      </div>
+    </div>
+    
+    <div class="reveal" style="transition-delay: 1.3s; text-align: center; margin-top: 24px;">
+      <span class="feature-badge cyan">🎬 ACTION</span>
+    </div>
+  </div>
+</section>
+
+<!-- ===== BEAT 2 — THE INCIDENT ===== -->
+<section class="beat" id="beat-2" data-beat="2">
+  <div class="beat-bg-effect"></div>
+  <div class="beat-content">
+    <div class="clock-display reveal" style="transition-delay: 0.1s">2:47 AM</div>
+    
+    <div class="quote red reveal" style="transition-delay: 0.3s">
+      "Nobody calls at 2:47 AM with good news."
+    </div>
+    
+    <p class="body-text reveal" style="transition-delay: 0.4s">
+      It's Merna. The payment service is down.<br>
+      <span class="hl-red">$12,000 is bleeding out every minute.</span>
+    </p>
+    
+    <div class="glass-card reveal" style="transition-delay: 0.5s; border-color: rgba(255,68,68,0.2);">
+      <p style="font-size: 0.9rem; color: var(--muted-grey);">She asks one question:</p>
+      <p style="font-size: 1.4rem; font-weight: 700; color: var(--alert-red); margin-top: 8px;">"What did you merge?"</p>
+    </div>
+    
+    <div class="glass-card reveal" style="transition-delay: 0.6s; background: rgba(255,68,68,0.03);">
+      <p style="font-size: 0.9rem; color: var(--muted-grey); margin-bottom: 8px;">The PR was already merged. The comment? <span class="hl-red">Unread.</span></p>
+      <div style="display: flex; align-items: center; gap: 12px;">
+        <span class="pr-badge" style="background: rgba(34,197,94,0.2); color: var(--success-green); padding: 4px 12px; border-radius: 4px; font-size: 0.75rem; font-weight: 700;">MERGED</span>
+        <span style="font-size: 0.8rem; color: var(--muted-grey);">Terraform change → customer_database.tf</span>
+        <span style="background: var(--alert-red); color: white; padding: 2px 8px; border-radius: 10px; font-size: 0.65rem; font-weight: 700;">99+</span>
+      </div>
+    </div>
+    
+    <div class="incident-timeline reveal" style="transition-delay: 0.7s">
+      <div class="timeline-item">
+        <div style="font-size: 2rem; font-weight: 900; color: var(--alert-red); font-family: 'JetBrains Mono', monospace;">4 hrs</div>
+        <div style="font-size: 0.7rem; color: var(--muted-grey); margin-top: 4px;">Rollback</div>
+      </div>
+      <div class="timeline-vs">vs</div>
+      <div class="timeline-item">
+        <div style="font-size: 2rem; font-weight: 900; color: var(--success-green); font-family: 'JetBrains Mono', monospace;">4 min</div>
+        <div style="font-size: 0.7rem; color: var(--muted-grey); margin-top: 4px;">The Fix</div>
+      </div>
+    </div>
+    
+    <div class="glass-card reveal" style="transition-delay: 0.8s; text-align: center; border-color: rgba(255,68,68,0.2);">
+      <p style="font-size: 1.1rem; color: var(--alert-red); font-weight: 700;">$47,000 lost</p>
+      <p style="font-size: 0.8rem; color: var(--muted-grey); margin-top: 4px;">That was last month. Then Merna quit. Then I quit.</p>
+    </div>
+    
+    <div class="reveal" style="transition-delay: 1.0s; text-align: center; margin-top: 20px;">
+      <p style="font-size: 1.3rem; font-weight: 700; color: var(--ghost-white);">The real cost isn't the money.</p>
+      <p style="font-size: 1.1rem; color: var(--alert-red); margin-top: 8px;">It's the people who leave.</p>
+    </div>
+    
+    <div class="handoff reveal" style="transition-delay: 1.1s; justify-content: center; display: flex; margin-top: 16px;">
+      🔄 Transition 1: Switch to Dashboard (Merna)
+    </div>
+  </div>
+</section>
+
+<!-- ===== BEAT 3 — ARABIC DEMO ===== -->
+<section class="beat" id="beat-3" data-beat="3">
+  <div class="beat-bg-effect"></div>
+  <div class="beat-content">
+    <div class="reveal" style="transition-delay: 0.1s">
+      <span style="font-size: 0.8rem; color: var(--gold); font-family: 'JetBrains Mono', monospace;">☀️ 9:00 AM — Morning PR Review</span>
+    </div>
+    
+    <h2 class="headline reveal" style="transition-delay: 0.2s; font-size: 2.8rem;">Lya Speaks Arabic</h2>
+    
+    <div class="chat-interface reveal" style="transition-delay: 0.4s">
+      <div class="chat-message chat-user">
+        <p class="arabic-text" style="font-size: 1.1rem;">إيه الخدمات اللي هتتأثر لو غيرت customer_database.tf؟</p>
+        <p style="font-size: 0.7rem; color: var(--muted-grey); margin-top: 4px; text-align: right;">What services are affected if I change customer_database.tf?</p>
+      </div>
+      <div class="chat-message chat-lya">
+        <div class="lya-badge">🤖 Lya — Spectre Impact</div>
+        <p style="font-size: 0.9rem; color: var(--ghost-white);">
+          <span class="hl-gold">15 services</span> affected by this change.
+        </p>
+        <div style="margin-top: 8px; font-size: 0.75rem; color: var(--muted-grey);">
+          Evidence: Terraform dependency graph → BFS traversal → 15 downstream services identified
+        </div>
+      </div>
+    </div>
+    
+    <div class="reveal" style="transition-delay: 0.6s">
+      <p style="font-size: 0.85rem; color: var(--muted-grey); margin-bottom: 8px;">🧠 She remembers. Session context active. Not a fresh chatbot — a colleague.</p>
+    </div>
+    
+    <div class="chat-interface reveal" style="transition-delay: 0.7s">
+      <div class="chat-message chat-user">
+        <p style="font-size: 0.9rem;">"Which of those are customer-facing?"</p>
+      </div>
+      <div class="chat-message chat-lya">
+        <div class="lya-badge">🤖 Lya — Filtered Results</div>
+        <div style="display: flex; flex-wrap: wrap; gap: 6px; margin-top: 8px;">
+          <span class="pr-badge" style="background: rgba(245,158,11,0.2); color: var(--gold); padding: 4px 10px; border-radius: 4px; font-size: 0.7rem;">web_frontend</span>
+          <span class="pr-badge" style="background: rgba(245,158,11,0.2); color: var(--gold); padding: 4px 10px; border-radius: 4px; font-size: 0.7rem;">mobile_app</span>
+          <span class="pr-badge" style="background: rgba(245,158,11,0.2); color: var(--gold); padding: 4px 10px; border-radius: 4px; font-size: 0.7rem;">checkout_journey</span>
+          <span class="pr-badge" style="background: rgba(245,158,11,0.2); color: var(--gold); padding: 4px 10px; border-radius: 4px; font-size: 0.7rem;">login_journey</span>
+          <span class="pr-badge" style="background: rgba(245,158,11,0.2); color: var(--gold); padding: 4px 10px; border-radius: 4px; font-size: 0.7rem;">profile_journey</span>
+        </div>
+      </div>
+    </div>
+    
+    <div class="glass-card reveal" style="transition-delay: 0.9s">
+      <p style="font-size: 0.8rem; color: var(--success-green); font-weight: 700; margin-bottom: 8px;">✅ Rollback Plan — Auto-Generated</p>
+      <ul class="checklist">
+        <li><span class="check">✓</span> terraform state list — verify current state</li>
+        <li><span class="check">✓</span> terraform plan -target=customer_database — review changes</li>
+        <li><span class="check">✓</span> terraform apply -target=customer_database — execute rollback</li>
+        <li><span class="check">✓</span> Verify payment service health check</li>
+      </ul>
+    </div>
+    
+    <div class="reveal" style="transition-delay: 1.0s; display: flex; align-items: center; gap: 16px; flex-wrap: wrap;">
+      <span class="feature-badge cyan">Feature 1: Blast Radius</span>
+      <span class="feature-badge gold">Deterministic BFS</span>
+      <span class="feature-badge green">Truth First, Explanation Second</span>
+    </div>
+    
+    <div class="reveal" style="transition-delay: 1.1s; margin-top: 16px;">
+      <p style="font-size: 0.9rem; color: var(--muted-grey);">Any company can register. Lya walks them through it. <span class="hl-cyan">Five minutes. Zero configuration.</span></p>
+      <p style="font-size: 1.1rem; color: var(--gold); font-weight: 700; margin-top: 8px;">Lya is the onboarding team.</p>
+    </div>
+  </div>
+</section>
+
+<!-- ===== BEAT 4 — CTO MODE ===== -->
+<section class="beat" id="beat-4" data-beat="4">
+  <div class="beat-bg-effect"></div>
+  <div class="beat-content">
+    <div class="reveal" style="transition-delay: 0.1s">
+      <div class="cto-badge">👔 CTO MODE: ACTIVATED</div>
+    </div>
+    
+    <h2 class="headline reveal" style="transition-delay: 0.2s; font-size: 2.8rem;">Business Impact</h2>
+    
+    <div class="quote gold reveal" style="transition-delay: 0.3s">
+      "It's 2 PM. I'm the CTO. Get out of my way or I will fire you."
+    </div>
+    
+    <div class="glass-card reveal" style="transition-delay: 0.4s; border-color: rgba(245,158,11,0.2);">
+      <p style="font-size: 0.8rem; color: var(--muted-grey); margin-bottom: 8px;">Query:</p>
+      <div class="code-block" style="font-size: 0.8rem;">
+        "What's the business impact of changing checkout_journey.tf?"
+      </div>
+    </div>
+    
+    <div class="business-impact">
+      <div class="impact-card reveal" style="transition-delay: 0.5s">
+        <div class="impact-value">85%</div>
+        <div class="impact-label">Users Affected</div>
+      </div>
+      <div class="impact-card reveal" style="transition-delay: 0.6s">
+        <div class="impact-value">14–17</div>
+        <div class="impact-label">Peak Hours (Cairo)</div>
+      </div>
+      <div class="impact-card reveal" style="transition-delay: 0.7s">
+        <div class="impact-value" style="color: var(--alert-red);">$1.2M</div>
+        <div class="impact-label">Daily Transactions at Risk</div>
+      </div>
+    </div>
+    
+    <div class="glass-card reveal" style="transition-delay: 0.8s">
+      <p style="font-size: 0.9rem; color: var(--muted-grey); margin-bottom: 12px;">That number comes from two places:</p>
+      <div style="display: flex; gap: 16px; flex-wrap: wrap;">
+        <div style="flex: 1; min-width: 200px; padding: 12px; background: rgba(245,158,11,0.05); border-radius: 8px; border: 1px solid rgba(245,158,11,0.15);">
+          <p style="font-size: 0.75rem; color: var(--gold); font-weight: 700;">📊 Business Impact Map</p>
+          <p style="font-size: 0.8rem; color: var(--muted-grey); margin-top: 4px;">Which services map to which revenue</p>
+        </div>
+        <div style="flex: 1; min-width: 200px; padding: 12px; background: rgba(255,68,68,0.05); border-radius: 8px; border: 1px solid rgba(255,68,68,0.15);">
+          <p style="font-size: 0.75rem; color: var(--alert-red); font-weight: 700;">📈 Incident History</p>
+          <p style="font-size: 0.8rem; color: var(--muted-grey); margin-top: 4px;">Which services fail at peak load</p>
+        </div>
+      </div>
+    </div>
+    
+    <div class="reveal" style="transition-delay: 0.9s; text-align: center; margin-top: 20px;">
+      <p style="font-size: 1rem; color: var(--muted-grey);">Without data, it's a <span style="color: var(--muted-grey); text-decoration: line-through;">guess</span>.</p>
+      <p style="font-size: 1.3rem; color: var(--ghost-white); font-weight: 700; margin-top: 4px;">With data, it's a <span class="hl-gold">decision</span>.</p>
+    </div>
+    
+    <div class="reveal" style="transition-delay: 1.0s; margin-top: 16px;">
+      <span class="feature-badge gold">Feature 2: Business Impact</span>
+      <p style="font-size: 0.85rem; color: var(--muted-grey); margin-top: 8px;">Not just what breaks — <span class="hl-gold">who pays</span>.</p>
+    </div>
+    
+    <div class="handoff reveal" style="transition-delay: 1.1s; margin-top: 12px;">
+      🔄 Transition 2: Switch to GitHub PR #5 (Malak)
+    </div>
+  </div>
+</section>
+
+<!-- ===== BEAT 5 — TRUST LAYER ===== -->
+<section class="beat" id="beat-5" data-beat="5">
+  <div class="beat-bg-effect"></div>
+  <div class="beat-content">
+    <div class="reveal" style="transition-delay: 0.1s">
+      <span style="font-size: 0.8rem; color: var(--muted-grey); font-family: 'JetBrains Mono', monospace;">🔒 4:00 PM — Still the CTO. Still skeptical.</span>
+    </div>
+    
+    <h2 class="headline reveal" style="transition-delay: 0.2s; font-size: 2.8rem;">The Trust Layer</h2>
+    
+    <div class="quote reveal" style="transition-delay: 0.3s">
+      "Can we trust an AI to touch production?"
+    </div>
+    
+    <div class="trust-features">
+      <div class="trust-item reveal" style="transition-delay: 0.4s">
+        <span class="trust-icon">🛡️</span>
+        <div class="trust-text"><strong>Deterministic Fallback</strong><br>Even if AI is unavailable, we still produce a plan.</div>
+      </div>
+      <div class="trust-item reveal" style="transition-delay: 0.5s">
+        <span class="trust-icon">👤</span>
+        <div class="trust-text"><strong>Human Approval Gate</strong><br>Before any step executes, a human approves.</div>
+      </div>
+      <div class="trust-item reveal" style="transition-delay: 0.6s">
+        <span class="trust-icon">📋</span>
+        <div class="trust-text"><strong>Full Audit Log</strong><br>Every action logged with user ID and timestamp.</div>
+      </div>
+      <div class="trust-item reveal" style="transition-delay: 0.7s">
+        <span class="trust-icon">🏅</span>
+        <div class="trust-text"><strong>SOC 2 Type One</strong><br>On roadmap for Q1 2027.</div>
+      </div>
+      <div class="trust-item reveal" style="transition-delay: 0.8s">
+        <span class="trust-icon">🔄</span>
+        <div class="trust-text"><strong>Feedback Loop</strong><br>Every correction feeds back. The next answer is better.</div>
+      </div>
+      <div class="trust-item reveal" style="transition-delay: 0.9s">
+        <span class="trust-icon">📜</span>
+        <div class="trust-text"><strong>Certificates in RAG</strong><br>Our own certs in the knowledge graph — Lya can reference them.</div>
+      </div>
+    </div>
+    
+    <div class="pr-comment-mock reveal" style="transition-delay: 1.0s">
+      <div class="pr-header">
+        <span style="color: var(--muted-grey); font-size: 0.75rem;">💬 Spectre Impact</span>
+        <span style="color: var(--muted-grey); font-size: 0.7rem;">posted on PR #5</span>
+      </div>
+      <div style="display: flex; flex-wrap: wrap; gap: 6px; margin-bottom: 12px;">
+        <span class="pr-badge severity-high">⚠️ HIGH SEVERITY</span>
+        <span class="pr-badge blast">💥 5 SERVICES</span>
+        <span class="pr-badge rollback">🔄 ROLLBACK READY</span>
+      </div>
+      <div style="font-size: 0.75rem; color: var(--muted-grey); line-height: 1.6;">
+        <strong style="color: var(--ghost-white);">Blast Radius:</strong> checkout_journey → 5 downstream services<br>
+        <strong style="color: var(--ghost-white);">Evidence:</strong> Terraform graph → BFS → 5 affected<br>
+        <strong style="color: var(--ghost-white);">Rollback:</strong> 3 steps, validated, ready to execute<br>
+        <strong style="color: var(--ghost-white);">Validation:</strong> ✅ Whitelist check passed<br>
+        <a href="#" style="color: var(--cyan); text-decoration: none;">🔗 Open in Lya Chat →</a>
+      </div>
+    </div>
+    
+    <div class="reveal" style="transition-delay: 1.1s;">
+      <span class="feature-badge green">Feature 3: One Source of Truth</span>
+      <p style="font-size: 0.85rem; color: var(--muted-grey); margin-top: 8px;">From GitHub, back to GitHub, and back to you.</p>
+    </div>
+    
+    <div class="handoff reveal" style="transition-delay: 1.2s; margin-top: 12px;">
+      🔄 Transition 3: Back to Presentation (Ahmed)
+    </div>
+  </div>
+</section>
+
+<!-- ===== BEAT 6a — TECHNICAL DEPTH ===== -->
+<section class="beat" id="beat-6a" data-beat="6">
+  <div class="beat-bg-effect"></div>
+  <div class="beat-content">
+    <div class="reveal" style="transition-delay: 0.1s">
+      <span style="font-size: 0.8rem; color: var(--cyan); font-family: 'JetBrains Mono', monospace;">⚙️ UNDER THE HOOD</span>
+    </div>
+    
+    <h2 class="headline reveal" style="transition-delay: 0.2s; font-size: 2.8rem;">Engineering Depth</h2>
+    
+    <div class="tech-stack">
+      <div class="tech-item reveal" style="transition-delay: 0.3s">
+        <span class="tech-status blocked">BLOCKED</span>
+        <span>Prompt injection attempts — guarded at every input</span>
+      </div>
+      <div class="tech-item reveal" style="transition-delay: 0.4s">
+        <span class="tech-status blocked">REDACTED</span>
+        <span>Secrets in output — filtered before response</span>
+      </div>
+      <div class="tech-item reveal" style="transition-delay: 0.5s">
+        <span class="tech-status secure">CHAINED</span>
+        <span>Multi-provider: if one goes down, we chain three</span>
+      </div>
+      <div class="tech-item reveal" style="transition-delay: 0.6s">
+        <span class="tech-status active">LOCAL</span>
+        <span>Embeddings run locally — no API key for retrieval</span>
+      </div>
+      <div class="tech-item reveal" style="transition-delay: 0.7s">
+        <span class="tech-status secure">WHITELIST</span>
+        <span>Every rollback command validated before execution</span>
+      </div>
+      <div class="tech-item reveal" style="transition-delay: 0.8s">
+        <span class="tech-status active">AUDIT</span>
+        <span>Every attempt logged with UTC timestamp</span>
+      </div>
+    </div>
+    
+    <div class="provider-chain reveal" style="transition-delay: 0.9s">
+      <div class="provider-node groq">Groq</div>
+      <span class="chain-arrow">→</span>
+      <div class="provider-node openai">OpenAI</div>
+      <span class="chain-arrow">→</span>
+      <div class="provider-node anthropic">Anthropic</div>
+      <span class="chain-arrow">→</span>
+      <div class="provider-node fallback">Fallback</div>
+    </div>
+    
+    <div class="stat-grid reveal" style="transition-delay: 1.0s">
+      <div class="stat-card">
+        <div class="stat-number" style="color: var(--cyan);">120</div>
+        <div class="stat-label">Real Documents</div>
+      </div>
+      <div class="stat-card">
+        <div class="stat-number" style="color: var(--success-green);">0</div>
+        <div class="stat-label">Data Stored on Our Side</div>
+      </div>
+      <div class="stat-card">
+        <div class="stat-number" style="color: var(--gold);">99.99%</div>
+        <div class="stat-label">Uptime Target</div>
+      </div>
+      <div class="stat-card">
+        <div class="stat-number" style="color: var(--alert-red);">∞</div>
+        <div class="stat-label">Audit Trail Depth</div>
+      </div>
+    </div>
+    
+    <div class="reveal" style="transition-delay: 1.1s; text-align: center; margin-top: 16px;">
+      <p style="font-size: 1.1rem; color: var(--ghost-white);">If Lya doesn't know, <span class="hl-cyan">she says so</span>.</p>
+    </div>
+  </div>
+</section>
+
+<!-- ===== BEAT 6b — BUSINESS CASE ===== -->
+<section class="beat" id="beat-6b" data-beat="7">
+  <div class="beat-bg-effect"></div>
+  <div class="beat-content">
+    <div class="reveal" style="transition-delay: 0.1s">
+      <span style="font-size: 0.8rem; color: var(--gold); font-family: 'JetBrains Mono', monospace;">📊 THE RECAP + BUSINESS CASE</span>
+    </div>
+    
+    <h2 class="headline reveal" style="transition-delay: 0.2s; font-size: 2.5rem;">What You Actually Saw</h2>
+    
+    <div class="three-pillars">
+      <div class="pillar reveal" style="transition-delay: 0.3s">
+        <div class="pillar-icon">🔮</div>
+        <div class="pillar-title" style="color: var(--cyan);">Predict</div>
+        <div class="pillar-desc">Before you merge, you know what breaks. Deterministic BFS. Not a guess — a computation.</div>
+      </div>
+      <div class="pillar reveal" style="transition-delay: 0.4s">
+        <div class="pillar-icon">⚖️</div>
+        <div class="pillar-title" style="color: var(--gold);">Prioritize</div>
+        <div class="pillar-desc">Not everything that breaks matters equally. We tell you who pays. One score.</div>
+      </div>
+      <div class="pillar reveal" style="transition-delay: 0.5s">
+        <div class="pillar-icon">🛡️</div>
+        <div class="pillar-title" style="color: var(--success-green);">Protect</div>
+        <div class="pillar-desc">Rollback plan is a checklist. Human-approved. Every action logged. Every decision auditable.</div>
+      </div>
+    </div>
+    
+    <div class="reveal" style="transition-delay: 0.6s">
+      <p style="font-size: 0.9rem; color: var(--muted-grey); margin-bottom: 12px;">Lya has <span class="hl-cyan">four modes</span>:</p>
+    </div>
+    
+    <div class="mode-grid reveal" style="transition-delay: 0.7s">
+      <div class="mode-card">
+        <div class="mode-icon">😊</div>
+        <div class="mode-name">Friend</div>
+      </div>
+      <div class="mode-card">
+        <div class="mode-icon">🔧</div>
+        <div class="mode-name">Engineer</div>
+      </div>
+      <div class="mode-card">
+        <div class="mode-icon">🎓</div>
+        <div class="mode-name">Coach</div>
+      </div>
+      <div class="mode-card">
+        <div class="mode-icon">🚨</div>
+        <div class="mode-name">Emergency</div>
+      </div>
+    </div>
+    
+    <div class="market-stats reveal" style="transition-delay: 0.8s">
+      <div class="market-stat">
+        <div class="market-value">$15K</div>
+        <div class="market-label">Downtime cost / minute (enterprise)</div>
+      </div>
+      <div class="market-stat">
+        <div class="market-value">82%</div>
+        <div class="market-label">Orgs with AI-code production failures</div>
+      </div>
+      <div class="market-stat">
+        <div class="market-value">$50–200K</div>
+        <div class="market-label">Saved per prevented outage</div>
+      </div>
+    </div>
+    
+    <div class="comparison-grid reveal" style="transition-delay: 0.9s">
+      <div class="comparison-item them">
+        <p style="font-size: 0.75rem; color: var(--muted-grey);">Datadog</p>
+        <p style="font-size: 0.9rem; color: var(--ghost-white); margin: 4px 0;">Tells you what <span class="hl-red">broke</span></p>
+      </div>
+      <div class="comparison-item us">
+        <p style="font-size: 0.75rem; color: var(--cyan);">Spectre Impact</p>
+        <p style="font-size: 0.9rem; color: var(--ghost-white); margin: 4px 0;">Tells you what <span class="hl-cyan">will break</span></p>
+      </div>
+    </div>
+    
+    <div class="reveal" style="transition-delay: 1.0s; text-align: center; margin-top: 16px;">
+      <p style="font-size: 1rem; color: var(--muted-grey);">Copilot helps you <span class="hl-gold">write code faster</span>.</p>
+      <p style="font-size: 1.2rem; color: var(--ghost-white); font-weight: 700; margin-top: 4px;">We help you <span class="hl-cyan">ship it safer</span>.</p>
+      <p class="arabic-text reveal" style="transition-delay: 1.1s; font-size: 1.5rem; color: var(--gold); margin-top: 12px;">حبيبة</p>
+    </div>
+  </div>
+</section>
+
+<!-- ===== BEAT 7 — ROADMAP + CLOSE ===== -->
+<section class="beat" id="beat-7" data-beat="8">
+  <div class="beat-bg-effect"></div>
+  <div class="beat-content">
+    <div class="reveal" style="transition-delay: 0.1s">
+      <span style="font-size: 0.8rem; color: var(--cyan); font-family: 'JetBrains Mono', monospace;">🚀 THAT'S TODAY. HERE'S TOMORROW.</span>
+    </div>
+    
+    <h2 class="headline reveal" style="transition-delay: 0.2s; font-size: 2.8rem;">The Roadmap</h2>
+    
+    <div class="roadmap-timeline">
+      <div class="roadmap-item reveal" style="transition-delay: 0.3s">
+        <p style="font-size: 0.9rem; font-weight: 700; color: var(--cyan);">CLI on PyPI</p>
+        <p style="font-size: 0.8rem; color: var(--muted-grey);">pip install spectre-impact — any developer, local install</p>
+      </div>
+      <div class="roadmap-item reveal" style="transition-delay: 0.4s">
+        <p style="font-size: 0.9rem; font-weight: 700; color: var(--cyan);">GitHub App</p>
+        <p style="font-size: 0.8rem; color: var(--muted-grey);">Install once per organization, not per repo</p>
+      </div>
+      <div class="roadmap-item reveal" style="transition-delay: 0.5s">
+        <p style="font-size: 0.9rem; font-weight: 700; color: var(--cyan);">Predictive Failure Detection</p>
+        <p style="font-size: 0.8rem; color: var(--muted-grey);">Learn from every incident to flag risky changes</p>
+      </div>
+      <div class="roadmap-item reveal" style="transition-delay: 0.6s">
+        <p style="font-size: 0.9rem; font-weight: 700; color: var(--cyan);">Slack + Jira Integrations</p>
+        <p style="font-size: 0.8rem; color: var(--muted-grey);">Native integrations with your workflow tools</p>
+      </div>
+      <div class="roadmap-item reveal" style="transition-delay: 0.7s">
+        <p style="font-size: 0.9rem; font-weight: 700; color: var(--gold);">Enterprise: SOC 2, SSO, Multi-Dialect Arabic</p>
+        <p style="font-size: 0.8rem; color: var(--muted-grey);">Sell to enterprises across the Gulf, Levant, and North Africa</p>
+      </div>
+    </div>
+    
+    <div class="team-counter reveal" style="transition-delay: 0.8s">
+      <div class="team-stat">
+        <div class="team-stat-value">5</div>
+        <div class="team-stat-label">Students</div>
+      </div>
+      <div class="team-stat">
+        <div class="team-stat-value">450</div>
+        <div class="team-stat-label">Hours</div>
+      </div>
+      <div class="team-stat">
+        <div class="team-stat-value" style="color: var(--gold);">∞</div>
+        <div class="team-stat-label">Ambition</div>
+      </div>
+    </div>
+    
+    <div class="reveal" style="transition-delay: 0.9s; text-align: center; margin: 24px 0;">
+      <p style="font-size: 1.2rem; color: var(--muted-grey);">NilePay isn't real. But the problem is.</p>
+      <p style="font-size: 1.4rem; font-weight: 700; color: var(--ghost-white); margin-top: 8px;">Every company has a <span class="hl-red">2:47 AM</span> story.</p>
+    </div>
+    
+    <div class="qr-section reveal" style="transition-delay: 1.0s">
+      <div class="qr-code">
+        <svg viewBox="0 0 150 150" xmlns="http://www.w3.org/2000/svg">
+          <!-- QR Code Pattern -->
+          <rect width="150" height="150" fill="white"/>
+          <!-- Position Detection Patterns -->
+          <rect x="10" y="10" width="35" height="35" fill="#0a1628"/>
+          <rect x="15" y="15" width="25" height="25" fill="white"/>
+          <rect x="20" y="20" width="15" height="15" fill="#0a1628"/>
+          
+          <rect x="105" y="10" width="35" height="35" fill="#0a1628"/>
+          <rect x="110" y="15" width="25" height="25" fill="white"/>
+          <rect x="115" y="20" width="15" height="15" fill="#0a1628"/>
+          
+          <rect x="10" y="105" width="35" height="35" fill="#0a1628"/>
+          <rect x="15" y="110" width="25" height="25" fill="white"/>
+          <rect x="20" y="115" width="15" height="15" fill="#0a1628"/>
+          
+          <!-- Data modules (decorative) -->
+          <rect x="55" y="10" width="5" height="5" fill="#0a1628"/>
+          <rect x="65" y="10" width="5" height="5" fill="#0a1628"/>
+          <rect x="75" y="15" width="5" height="5" fill="#0a1628"/>
+          <rect x="85" y="10" width="5" height="5" fill="#0a1628"/>
+          <rect x="55" y="20" width="5" height="5" fill="#0a1628"/>
+          <rect x="70" y="25" width="5" height="5" fill="#0a1628"/>
+          <rect x="80" y="20" width="5" height="5" fill="#0a1628"/>
+          <rect x="90" y="25" width="5" height="5" fill="#0a1628"/>
+          <rect x="55" y="30" width="5" height="5" fill="#0a1628"/>
+          <rect x="65" y="35" width="5" height="5" fill="#0a1628"/>
+          <rect x="85" y="30" width="5" height="5" fill="#0a1628"/>
+          <rect x="95" y="35" width="5" height="5" fill="#0a1628"/>
+          
+          <rect x="10" y="55" width="5" height="5" fill="#0a1628"/>
+          <rect x="20" y="60" width="5" height="5" fill="#0a1628"/>
+          <rect x="30" y="55" width="5" height="5" fill="#0a1628"/>
+          <rect x="40" y="65" width="5" height="5" fill="#0a1628"/>
+          <rect x="55" y="55" width="5" height="5" fill="#0a1628"/>
+          <rect x="65" y="60" width="5" height="5" fill="#0a1628"/>
+          <rect x="75" y="55" width="5" height="5" fill="#0a1628"/>
+          <rect x="85" y="60" width="5" height="5" fill="#0a1628"/>
+          <rect x="95" y="55" width="5" height="5" fill="#0a1628"/>
+          
+          <rect x="10" y="70" width="5" height="5" fill="#0a1628"/>
+          <rect x="25" y="75" width="5" height="5" fill="#0a1628"/>
+          <rect x="35" y="70" width="5" height="5" fill="#0a1628"/>
+          <rect x="55" y="70" width="5" height="5" fill="#0a1628"/>
+          <rect x="70" y="75" width="5" height="5" fill="#0a1628"/>
+          <rect x="80" y="70" width="5" height="5" fill="#0a1628"/>
+          <rect x="95" y="75" width="5" height="5" fill="#0a1628"/>
+          
+          <rect x="10" y="85" width="5" height="5" fill="#0a1628"/>
+          <rect x="20" y="90" width="5" height="5" fill="#0a1628"/>
+          <rect x="35" y="85" width="5" height="5" fill="#0a1628"/>
+          <rect x="55" y="85" width="5" height="5" fill="#0a1628"/>
+          <rect x="65" y="90" width="5" height="5" fill="#0a1628"/>
+          <rect x="80" y="85" width="5" height="5" fill="#0a1628"/>
+          <rect x="90" y="90" width="5" height="5" fill="#0a1628"/>
+          
+          <rect x="55" y="105" width="5" height="5" fill="#0a1628"/>
+          <rect x="65" y="110" width="5" height="5" fill="#0a1628"/>
+          <rect x="75" y="105" width="5" height="5" fill="#0a1628"/>
+          <rect x="85" y="115" width="5" height="5" fill="#0a1628"/>
+          <rect x="95" y="105" width="5" height="5" fill="#0a1628"/>
+          
+          <rect x="105" y="55" width="5" height="5" fill="#0a1628"/>
+          <rect x="115" y="60" width="5" height="5" fill="#0a1628"/>
+          <rect x="125" y="55" width="5" height="5" fill="#0a1628"/>
+          <rect x="135" y="65" width="5" height="5" fill="#0a1628"/>
+          <rect x="105" y="70" width="5" height="5" fill="#0a1628"/>
+          <rect x="120" y="75" width="5" height="5" fill="#0a1628"/>
+          <rect x="130" y="70" width="5" height="5" fill="#0a1628"/>
+          <rect x="105" y="85" width="5" height="5" fill="#0a1628"/>
+          <rect x="115" y="90" width="5" height="5" fill="#0a1628"/>
+          <rect x="130" y="85" width="5" height="5" fill="#0a1628"/>
+          <rect x="105" y="105" width="5" height="5" fill="#0a1628"/>
+          <rect x="120" y="110" width="5" height="5" fill="#0a1628"/>
+          <rect x="135" y="105" width="5" height="5" fill="#0a1628"/>
+          <rect x="110" y="120" width="5" height="5" fill="#0a1628"/>
+          <rect x="125" y="125" width="5" height="5" fill="#0a1628"/>
+          <rect x="135" y="130" width="5" height="5" fill="#0a1628"/>
+          
+          <!-- Center logo area -->
+          <rect x="60" y="60" width="30" height="30" rx="4" fill="white" stroke="#00d4ff" stroke-width="2"/>
+          <text x="75" y="80" text-anchor="middle" font-size="14" font-weight="bold" fill="#0a1628">S</text>
+        </svg>
+      </div>
+      <p style="margin-top: 16px; font-size: 0.9rem; color: var(--muted-grey);">Scan to install. It's live. It's open source.</p>
+      <p style="font-size: 0.8rem; color: var(--cyan); margin-top: 4px; font-family: 'JetBrains Mono', monospace;">pip install spectre-impact</p>
+    </div>
+    
+    <div class="reveal" style="transition-delay: 1.2s; text-align: center; margin-top: 24px;">
+      <p style="font-size: 1.3rem; font-weight: 700; color: var(--ghost-white);">We built the fix. <span class="hl-cyan">It's yours.</span></p>
+    </div>
+    
+    <div class="reveal" style="transition-delay: 1.3s; text-align: center; margin-top: 16px;">
+      <p style="font-size: 0.8rem; color: var(--muted-grey); font-style: italic;">Everything we said about the CTO firing people? That was a joke. We respect everyone. Especially our DevOps instructor. 😄</p>
+    </div>
+  </div>
+</section>
+
+<!-- Bottom Navigation -->
+<div class="bottom-nav" id="bottomNav">
+  <button id="prevBtn" aria-label="Previous beat">← Prev</button>
+  <span class="beat-counter" id="beatCounter">1 / 8</span>
+  <button id="nextBtn" aria-label="Next beat">Next →</button>
+  <label class="autoplay-toggle">
+    <input type="checkbox" id="autoplayToggle"> Auto
+  </label>
+</div>
+
+<script>
+// ===== CONFIGURATION =====
+const BEATS = [
+  { id: 'beat-1', speaker: 'Malak', role: 'AI Systems Engineer', beatLabel: 'Beat 1 — Premise', label: 'Premise' },
+  { id: 'beat-2', speaker: 'Ahmed', role: 'Backend Engineer', beatLabel: 'Beat 2 — Incident', label: 'Incident' },
+  { id: 'beat-3', speaker: 'Merna', role: 'Frontend Developer', beatLabel: 'Beat 3 — Arabic Demo', label: 'Arabic Demo' },
+  { id: 'beat-4', speaker: 'Malak', role: 'AI Systems Eng. (CTO)', beatLabel: 'Beat 4 — CTO Mode', label: 'CTO Mode' },
+  { id: 'beat-5', speaker: 'Malak', role: 'AI Systems Engineer', beatLabel: 'Beat 5 — Trust Layer', label: 'Trust Layer' },
+  { id: 'beat-6a', speaker: 'Ahmed', role: 'Backend Engineer', beatLabel: 'Beat 6a — Tech Depth', label: 'Tech Depth' },
+  { id: 'beat-6b', speaker: 'Abu Bakr', role: 'Backend Engineer', beatLabel: 'Beat 6b — Business Case', label: 'Business Case' },
+  { id: 'beat-7', speaker: 'Habiba', role: 'UI/UX Designer', beatLabel: 'Beat 7 — Roadmap + Close', label: 'Close' },
+];
+
+let currentBeat = 0;
+let autoplayInterval = null;
+let speakerPanelVisible = true;
+let recoveryCardVisible = false;
+
+// ===== PARTICLE BACKGROUND =====
+const canvas = document.getElementById('bg-canvas');
+const ctx = canvas.getContext('2d');
+let particles = [];
+let animationId;
+let beatColors = {
+  0: { primary: [0, 212, 255], secondary: [0, 102, 255] },    // Cyan
+  1: { primary: [255, 68, 68], secondary: [255, 136, 0] },     // Red
+  2: { primary: [245, 158, 11], secondary: [0, 212, 255] },    // Gold/Cyan
+  3: { primary: [245, 158, 11], secondary: [255, 200, 50] },   // Gold
+  4: { primary: [34, 197, 94], secondary: [0, 212, 255] },     // Green/Cyan
+  5: { primary: [0, 212, 255], secondary: [0, 102, 255] },     // Cyan
+  6: { primary: [34, 197, 94], secondary: [245, 158, 11] },    // Green/Gold
+  7: { primary: [0, 212, 255], secondary: [245, 158, 11] },    // Cyan/Gold
+};
+
+function resizeCanvas() {
+  canvas.width = window.innerWidth;
+  canvas.height = window.innerHeight;
+}
+
+function createParticles() {
+  particles = [];
+  const count = Math.min(100, Math.floor((window.innerWidth * window.innerHeight) / 15000));
+  for (let i = 0; i < count; i++) {
+    particles.push({
+      x: Math.random() * canvas.width,
+      y: Math.random() * canvas.height,
+      vx: (Math.random() - 0.5) * 0.5,
+      vy: (Math.random() - 0.5) * 0.5,
+      radius: Math.random() * 2 + 0.5,
+      opacity: Math.random() * 0.5 + 0.2,
+    });
+  }
+}
+
+function getBeatColor() {
+  const colors = beatColors[currentBeat] || beatColors[0];
+  return colors;
+}
+
+function drawParticles() {
+  ctx.clearRect(0, 0, canvas.width, canvas.height);
+  const colors = getBeatColor();
+  const connectionDist = 150;
+  
+  // Draw connections
+  for (let i = 0; i < particles.length; i++) {
+    for (let j = i + 1; j < particles.length; j++) {
+      const dx = particles[i].x - particles[j].x;
+      const dy = particles[i].y - particles[j].y;
+      const dist = Math.sqrt(dx * dx + dy * dy);
+      
+      if (dist < connectionDist) {
+        const opacity = (1 - dist / connectionDist) * 0.15;
+        ctx.beginPath();
+        ctx.strokeStyle = `rgba(${colors.primary[0]}, ${colors.primary[1]}, ${colors.primary[2]}, ${opacity})`;
+        ctx.lineWidth = 0.5;
+        ctx.moveTo(particles[i].x, particles[i].y);
+        ctx.lineTo(particles[j].x, particles[j].y);
+        ctx.stroke();
+      }
+    }
+  }
+  
+  // Draw particles
+  for (const p of particles) {
+    ctx.beginPath();
+    ctx.arc(p.x, p.y, p.radius, 0, Math.PI * 2);
+    ctx.fillStyle = `rgba(${colors.primary[0]}, ${colors.primary[1]}, ${colors.primary[2]}, ${p.opacity})`;
+    ctx.fill();
+    
+    // Glow
+    ctx.beginPath();
+    ctx.arc(p.x, p.y, p.radius * 3, 0, Math.PI * 2);
+    ctx.fillStyle = `rgba(${colors.primary[0]}, ${colors.primary[1]}, ${colors.primary[2]}, ${p.opacity * 0.1})`;
+    ctx.fill();
+    
+    // Update position
+    p.x += p.vx;
+    p.y += p.vy;
+    
+    // Wrap around
+    if (p.x < 0) p.x = canvas.width;
+    if (p.x > canvas.width) p.x = 0;
+    if (p.y < 0) p.y = canvas.height;
+    if (p.y > canvas.height) p.y = 0;
+  }
+  
+  animationId = requestAnimationFrame(drawParticles);
+}
+
+// ===== NAVIGATION =====
+function createNavDots() {
+  const container = document.getElementById('navDots');
+  BEATS.forEach((beat, index) => {
+    const dot = document.createElement('div');
+    dot.className = 'nav-dot' + (index === 0 ? ' active' : '');
+    dot.innerHTML = `<span class="dot-label">${beat.label}</span>`;
+    dot.addEventListener('click', () => goToBeat(index));
+    container.appendChild(dot);
+  });
+}
+
+function goToBeat(index) {
+  if (index < 0 || index >= BEATS.length) return;
+  currentBeat = index;
+  const el = document.getElementById(BEATS[index].id);
+  if (el) {
+    el.scrollIntoView({ behavior: 'smooth' });
+  }
+  updateUI();
+}
+
+function updateUI() {
+  // Update speaker panel
+  const beat = BEATS[currentBeat];
+  const nextBeat = BEATS[currentBeat + 1];
+  
+  document.getElementById('currentSpeaker').textContent = beat.speaker;
+  document.getElementById('currentRole').textContent = beat.role;
+  document.getElementById('currentBeat').textContent = beat.beatLabel;
+  
+  if (nextBeat) {
+    document.getElementById('nextSpeaker').textContent = nextBeat.speaker;
+    document.getElementById('nextBeat').textContent = nextBeat.beatLabel;
+  } else {
+    document.getElementById('nextSpeaker').textContent = '—';
+    document.getElementById('nextBeat').textContent = 'End';
+  }
+  
+  // Update nav dots
+  document.querySelectorAll('.nav-dot').forEach((dot, i) => {
+    dot.classList.toggle('active', i === currentBeat);
+  });
+  
+  // Update beat counter
+  document.getElementById('beatCounter').textContent = `${currentBeat + 1} / ${BEATS.length}`;
+  
+  // Update progress bar
+  const progress = ((currentBeat + 1) / BEATS.length) * 100;
+  document.getElementById('progressBar').style.width = progress + '%';
+  
+  // Trigger reveal animations for current beat
+  triggerReveals();
+  
+  // Trigger counters
+  triggerCounters();
+}
+
+function triggerReveals() {
+  const currentSection = document.getElementById(BEATS[currentBeat].id);
+  if (!currentSection) return;
+  
+  const reveals = currentSection.querySelectorAll('.reveal, .reveal-left, .reveal-right, .reveal-scale');
+  reveals.forEach((el, i) => {
+    setTimeout(() => {
+      el.classList.add('visible');
+    }, i * 100);
+  });
+}
+
+function triggerCounters() {
+  const currentSection = document.getElementById(BEATS[currentBeat].id);
+  if (!currentSection) return;
+  
+  const counters = currentSection.querySelectorAll('.counter');
+  counters.forEach(counter => {
+    const target = parseInt(counter.dataset.target);
+    const format = counter.dataset.format;
+    animateCounter(counter, target, format);
+  });
+}
+
+function animateCounter(el, target, format) {
+  let current = 0;
+  const increment = target / 60;
+  const timer = setInterval(() => {
+    current += increment;
+    if (current >= target) {
+      current = target;
+      clearInterval(timer);
+    }
+    let display = Math.floor(current);
+    if (format === 'comma') {
+      display = display.toLocaleString();
+    }
+    el.textContent = display;
+  }, 16);
+}
+
+// ===== SCROLL DETECTION =====
+function setupScrollDetection() {
+  const observer = new IntersectionObserver((entries) => {
+    entries.forEach(entry => {
+      if (entry.isIntersecting) {
+        const beatIndex = BEATS.findIndex(b => b.id === entry.target.id);
+        if (beatIndex !== -1) {
+          currentBeat = beatIndex;
+          updateUI();
+        }
+      }
+    });
+  }, { threshold: 0.5 });
+  
+  BEATS.forEach(beat => {
+    const el = document.getElementById(beat.id);
+    if (el) observer.observe(el);
+  });
+}
+
+// ===== KEYBOARD NAVIGATION =====
+document.addEventListener('keydown', (e) => {
+  // Don't navigate if user is typing in an input
+  if (e.target.tagName === 'INPUT' || e.target.tagName === 'TEXTAREA') return;
+  
+  switch(e.key) {
+    case 'ArrowDown':
+    case 'ArrowRight':
+    case ' ':
+      e.preventDefault();
+      goToBeat(currentBeat + 1);
+      break;
+    case 'ArrowUp':
+    case 'ArrowLeft':
+      e.preventDefault();
+      goToBeat(currentBeat - 1);
+      break;
+    case 's':
+    case 'S':
+      toggleSpeakerPanel();
+      break;
+    case 'r':
+    case 'R':
+      toggleRecoveryCard();
+      break;
+  }
+});
+
+// ===== TOUCH SUPPORT =====
+let touchStartY = 0;
+let touchStartX = 0;
+
+document.addEventListener('touchstart', (e) => {
+  touchStartY = e.touches[0].clientY;
+  touchStartX = e.touches[0].clientX;
+}, { passive: true });
+
+document.addEventListener('touchend', (e) => {
+  const touchEndY = e.changedTouches[0].clientY;
+  const touchEndX = e.changedTouches[0].clientX;
+  const diffY = touchStartY - touchEndY;
+  const diffX = touchStartX - touchEndX;
+  
+  // Only handle horizontal swipes or large vertical swipes
+  if (Math.abs(diffX) > Math.abs(diffY) && Math.abs(diffX) > 50) {
+    if (diffX > 0) goToBeat(currentBeat + 1);
+    else goToBeat(currentBeat - 1);
+  }
+}, { passive: true });
+
+// ===== SPEAKER PANEL TOGGLE =====
+function toggleSpeakerPanel() {
+  speakerPanelVisible = !speakerPanelVisible;
+  document.getElementById('speakerPanel').classList.toggle('hidden', !speakerPanelVisible);
+}
+
+// ===== RECOVERY CARD TOGGLE =====
+function toggleRecoveryCard() {
+  recoveryCardVisible = !recoveryCardVisible;
+  document.getElementById('recoveryCard').classList.toggle('visible', recoveryCardVisible);
+}
+
+// ===== AUTOPLAY =====
+function toggleAutoplay() {
+  const checkbox = document.getElementById('autoplayToggle');
+  if (checkbox.checked) {
+    autoplayInterval = setInterval(() => {
+      if (currentBeat < BEATS.length - 1) {
+        goToBeat(currentBeat + 1);
+      } else {
+        checkbox.checked = false;
+        clearInterval(autoplayInterval);
+      }
+    }, 15000);
+  } else {
+    clearInterval(autoplayInterval);
+  }
+}
+
+// ===== PREV/NEXT BUTTONS =====
+document.getElementById('prevBtn').addEventListener('click', () => goToBeat(currentBeat - 1));
+document.getElementById('nextBtn').addEventListener('click', () => goToBeat(currentBeat + 1));
+document.getElementById('autoplayToggle').addEventListener('change', toggleAutoplay);
+
+// ===== INITIALIZATION =====
+function init() {
+  resizeCanvas();
+  createParticles();
+  drawParticles();
+  createNavDots();
+  setupScrollDetection();
+  updateUI();
+  
+  window.addEventListener('resize', () => {
+    resizeCanvas();
+    createParticles();
+  });
+}
+
+// Start when DOM is ready
+if (document.readyState === 'loading') {
+  document.addEventListener('DOMContentLoaded', init);
+} else {
+  init();
+}
+</script>
+</body>
+</html>
