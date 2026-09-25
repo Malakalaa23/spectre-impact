@@ -6,9 +6,11 @@ of LLM providers in order, returning the first successful response.
 
 Provider chain (configurable at runtime):
     1. Groq      — primary. Fast, cheap, high throughput.
-    2. OpenAI    — first fallback. Reliable, more expensive.
-    3. Anthropic — second fallback. Excellent reasoning, slower.
-    4. Fallback  — deterministic response if all providers fail.
+                   Tries a large model first, then a small model on 429.
+    2. Google    — first fallback. Free tier, reliable, no credit card.
+    3. OpenAI    — second fallback. Reliable, more expensive.
+    4. Anthropic — third fallback. Excellent reasoning, slower.
+    5. Fallback  — deterministic response if all providers fail.
 
 Design principles:
     - Never raise. Always return a valid dict.
@@ -41,8 +43,16 @@ logger = logging.getLogger(__name__)
 # ---------------------------------------------------------------------------
 # Configuration
 # ---------------------------------------------------------------------------
+# Groq models are tried in order. The second is a smaller, faster model
+# that is less likely to hit token-per-minute rate limits.
+GROQ_MODELS: list[str] = [
+    "openai/gpt-oss-120b",
+    "llama3-8b-8192",
+]
+
 DEFAULT_MODELS: dict[str, str] = {
-    "groq": "openai/gpt-oss-120b",
+    "groq": GROQ_MODELS[0],  # primary
+    "google": "gemini-1.5-flash",
     "openai": "gpt-4o-mini",
     "anthropic": "claude-3-haiku-20240307",
 }
@@ -102,6 +112,25 @@ def _get_groq_client():
         return None
 
 
+def _get_google_client():
+    """Lazily initialize the Google Gemini client (global config)."""
+    if "google" in _clients:
+        return _clients["google"]
+    api_key = os.getenv("GOOGLE_API_KEY")
+    if not api_key:
+        _clients["google"] = None
+        return None
+    try:
+        import google.generativeai as genai
+        genai.configure(api_key=api_key)
+        _clients["google"] = genai
+        return _clients["google"]
+    except Exception as exc:  # noqa: BLE001
+        logger.warning("Google client init failed: %s", exc)
+        _clients["google"] = None
+        return None
+
+
 def _get_openai_client():
     """Lazily initialize the OpenAI client."""
     if "openai" in _clients:
@@ -142,33 +171,78 @@ def _get_anthropic_client():
 # Per-provider call functions (sync)
 # ---------------------------------------------------------------------------
 def _call_groq(prompt: str, max_tokens: int, temperature: float) -> ModelResult:
-    """Call Groq and return a ModelResult. Raises on any error."""
+    """
+    Call Groq, trying multiple models in order.
+    Raises on any error if all models fail.
+    """
     client = _get_groq_client()
     if client is None:
         raise RuntimeError("Groq client unavailable")
 
-    model = DEFAULT_MODELS["groq"]
+    last_error: Exception | None = None
+
+    for model in GROQ_MODELS:
+        try:
+            start = time.monotonic()
+            response = client.chat.completions.create(
+                model=model,
+                messages=[{"role": "user", "content": prompt}],
+                max_tokens=max_tokens,
+                temperature=temperature,
+                timeout=DEFAULT_TIMEOUT,
+            )
+            latency_ms = int((time.monotonic() - start) * 1000)
+            text = response.choices[0].message.content or ""
+
+            usage = getattr(response, "usage", None)
+            return ModelResult(
+                provider="groq",
+                model=model,
+                text=text,
+                latency_ms=latency_ms,
+                input_tokens=getattr(usage, "prompt_tokens", 0) if usage else 0,
+                output_tokens=getattr(usage, "completion_tokens", 0) if usage else 0,
+            )
+        except Exception as exc:  # noqa: BLE001
+            last_error = exc
+            # Only retry with a smaller model if this looks like a rate limit.
+            if "429" in str(exc) or "rate limit" in str(exc).lower():
+                logger.warning("Groq model %s hit rate limit, trying next...", model)
+                continue
+            # Any other error is fatal for Groq; move to next provider.
+            break
+
+    # If we get here, all Groq models failed.
+    raise RuntimeError(f"Groq models exhausted: {last_error}")
+
+
+def _call_google(prompt: str, max_tokens: int, temperature: float) -> ModelResult:
+    """Call Google Gemini and return a ModelResult. Raises on any error."""
+    genai = _get_google_client()
+    if genai is None:
+        raise RuntimeError("Google client unavailable")
+
+    model_name = DEFAULT_MODELS["google"]
     start = time.monotonic()
 
-    response = client.chat.completions.create(
-        model=model,
-        messages=[{"role": "user", "content": prompt}],
-        max_tokens=max_tokens,
-        temperature=temperature,
-        timeout=DEFAULT_TIMEOUT,
+    model = genai.GenerativeModel(model_name)
+    response = model.generate_content(
+        prompt,
+        generation_config={
+            "max_output_tokens": max_tokens,
+            "temperature": temperature,
+        },
+        request_options={"timeout": DEFAULT_TIMEOUT},
     )
 
     latency_ms = int((time.monotonic() - start) * 1000)
-    text = response.choices[0].message.content or ""
+    text = response.text or ""
 
-    usage = getattr(response, "usage", None)
     return ModelResult(
-        provider="groq",
-        model=model,
+        provider="google",
+        model=model_name,
         text=text,
         latency_ms=latency_ms,
-        input_tokens=getattr(usage, "prompt_tokens", 0) if usage else 0,
-        output_tokens=getattr(usage, "completion_tokens", 0) if usage else 0,
     )
 
 
@@ -245,6 +319,7 @@ def _call_anthropic(prompt: str, max_tokens: int, temperature: float) -> ModelRe
 # ---------------------------------------------------------------------------
 _PROVIDERS: list[tuple[str, Any]] = [
     ("groq", _call_groq),
+    ("google", _call_google),
     ("openai", _call_openai),
     ("anthropic", _call_anthropic),
 ]
@@ -290,7 +365,7 @@ def call_ai(
         max_tokens: Max tokens for the response.
         temperature: Sampling temperature.
         providers: Optional subset of provider names to try, in order.
-                   Defaults to ["groq", "openai", "anthropic"].
+                   Defaults to ["groq", "google", "openai", "anthropic"].
 
     Returns:
         A dict with provider, model, text, latency_ms, tokens, metadata.
@@ -360,7 +435,7 @@ def provider_status() -> dict[str, Any]:
     """
     status: dict[str, Any] = {"chain": [name for name, _ in _PROVIDERS]}
 
-    for name in ("groq", "openai", "anthropic"):
+    for name in ("groq", "google", "openai", "anthropic"):
         env_var = f"{name.upper()}_API_KEY"
         has_key = bool(os.getenv(env_var))
         status[name] = {
@@ -371,6 +446,8 @@ def provider_status() -> dict[str, Any]:
 
     if _get_groq_client() is not None:
         status["groq"]["available"] = True
+    if _get_google_client() is not None:
+        status["google"]["available"] = True
     if _get_openai_client() is not None:
         status["openai"]["available"] = True
     if _get_anthropic_client() is not None:

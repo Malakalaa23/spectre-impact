@@ -1,27 +1,11 @@
 """
 agent.py — The Lya chat agent (direct Groq, no LangChain).
 
-History:
-    The original implementation used `langchain.agents.create_agent`, which
-    builds a compiled LangGraph. That framework added 74 seconds of overhead
-    to a turn that should take 1-2 seconds (measured: raw Groq = 1.4s,
-    LangChain agent = 74.7s). The overhead is inherent to the framework —
-    it re-serializes the tool catalog, runs the state machine, and validates
-    Pydantic schemas on every step.
-
-    This version calls Groq directly and hand-rolls the tool-calling loop.
-    Same behavior, same public API, ~15x faster.
-
-Session awareness:
-    On every chat call, we touch the session via `chat.memory`, read the
-    resulting context (mood, session age, turn count, recent incidents,
-    cross-session patterns), and append a compact context block to the
-    system prompt.
-
-Runtime guard:
-    Before calling Groq, `chat()` checks whether the user's message looks
-    like an orphan follow-up with no history. If so, it returns a
-    clarification request without calling the model.
+Rate limits:
+    Groq's free tier caps at 8000 tokens per minute. If we still hit a 429
+    after retries, we fall back to `ai.multi_provider.call_ai()`, which
+    routes through Google Gemini (free tier). The user never sees a
+    rate-limit error on stage.
 
 Public API:
     chat(message, session_id, user_id, history, tools) -> dict
@@ -48,6 +32,9 @@ from chat.memory import (
     touch_session,
 )
 
+# Multi-provider fallback chain. Routes Groq -> Google -> deterministic.
+from ai.multi_provider import call_ai
+
 
 logger = logging.getLogger(__name__)
 
@@ -55,44 +42,39 @@ logger = logging.getLogger(__name__)
 # ---------------------------------------------------------------------------
 # Model configuration
 # ---------------------------------------------------------------------------
-#
-# Chat runs TWICE per user message in the tool-calling loop (once to plan
-# tool calls, once to write the response). Latency matters. gpt-oss-20b
-# responds in ~1 second on Groq from Egypt; gpt-oss-120b takes 3-5x longer
-# for the same task and adds nothing Lya needs.
-#
-# Override with SPECTRE_CHAT_MODEL if a specific model is needed.
 DEFAULT_MODEL = os.getenv("SPECTRE_CHAT_MODEL", "openai/gpt-oss-20b")
 DEFAULT_TEMPERATURE = 0
 MAX_TOKENS = 700
 GROQ_TIMEOUT = 30.0
-MAX_TOOL_ITERATIONS = 5
+
+# Tool-calling loop. Every iteration is a separate Groq call. Cutting
+# from 5 to 3 shaves ~2-4 seconds off a tool-heavy turn without losing
+# the ability to chain tools (analyze -> list -> details is 3 hops).
+MAX_TOOL_ITERATIONS = 3
+
+# Retry policy for 429s. Keep the retries short: if two attempts fail,
+# fall over to multi_provider rather than making the user wait longer.
+GROQ_RETRY_ATTEMPTS = 2
+GROQ_RETRY_BASE_WAIT = 4.0  # seconds
+
+# History window. Each turn costs ~80-150 tokens. Six is enough to
+# preserve thread while staying under the free-tier TPM limit.
+HISTORY_TURN_LIMIT = 6
+
+# Tool results going back into the model. ChromaDB results can be huge.
+# 2000 chars is the sweet spot: substance without context bloat.
+TOOL_RESULT_MAX_CHARS = 2000
 
 
 # ---------------------------------------------------------------------------
 # Orphan follow-up detection
 # ---------------------------------------------------------------------------
 _REFERENTIAL_PATTERNS = [
-    r"\bthose\b",
-    r"\bthem\b",
-    r"\bthat\b",
-    r"\bthese\b",
-    r"\bthe same\b",
-    r"\bwhich of\b",
-    r"\bof those\b",
-    r"\bpreviously\b",
-    r"\bearlier\b",
-    r"\babove\b",
-    r"\bthe (?:one|list|above)\b",
-    # Egyptian Arabic equivalents
-    r"دول",
-    r"ده",
-    r"دي",
-    r"اللي فات",
-    r"اللي قلته",
-    r"اللي قلتيه",
-    r"إيه أخطرهم",
-    r"أي واحدة فيهم",
+    r"\bthose\b", r"\bthem\b", r"\bthat\b", r"\bthese\b", r"\bthe same\b",
+    r"\bwhich of\b", r"\bof those\b", r"\bpreviously\b", r"\bearlier\b",
+    r"\babove\b", r"\bthe (?:one|list|above)\b",
+    r"دول", r"ده", r"دي", r"اللي فات", r"اللي قلته", r"اللي قلتيه",
+    r"إيه أخطرهم", r"أي واحدة فيهم",
 ]
 
 
@@ -137,10 +119,8 @@ def _detect_mood_signals(message: str) -> list[str]:
 
     if re.search(r"\b[A-Z]{4,}\b", stripped):
         signals.append("all_caps")
-
     if stripped.count("!") >= 2:
         signals.append("exclamations")
-
     if len(stripped.split()) <= 3:
         signals.append("short_message")
 
@@ -160,7 +140,7 @@ def _detect_mood_signals(message: str) -> list[str]:
 
 
 # ---------------------------------------------------------------------------
-# Service name extraction (for incident tracking)
+# Service name extraction
 # ---------------------------------------------------------------------------
 _SERVICE_PATTERNS = [
     re.compile(r"\b([a-z][a-z0-9_]{2,}_service)\b"),
@@ -173,7 +153,6 @@ _SERVICE_PATTERNS = [
 
 
 def _extract_service_names(message: str) -> list[str]:
-    """Return any service-like tokens found in the message. Deduped."""
     if not message:
         return []
     found: set[str] = set()
@@ -187,7 +166,6 @@ def _extract_service_names(message: str) -> list[str]:
 # Session context formatting
 # ---------------------------------------------------------------------------
 def _format_context_block(ctx: dict[str, Any]) -> str:
-    """Build a compact context block to append to the system prompt."""
     if not ctx:
         return ""
 
@@ -201,7 +179,6 @@ def _format_context_block(ctx: dict[str, Any]) -> str:
         lines.append(f"- This is session #{session_count} with this user.")
     if turn_count > 1:
         lines.append(f"- This is turn {turn_count} of the current session.")
-
     if mood and mood != "unknown":
         lines.append(f"- Current mood read: {mood}.")
 
@@ -231,20 +208,16 @@ def _format_context_block(ctx: dict[str, Any]) -> str:
 # Tool schema conversion
 # ---------------------------------------------------------------------------
 def _schema_of(tool: BaseTool) -> dict[str, Any]:
-    """
-    Convert a LangChain tool's args_schema into an OpenAI/Groq function
-    schema. Handles Pydantic v1, Pydantic v2, and raw dict schemas.
-    """
     schema = getattr(tool, "args_schema", None)
     if schema is None:
         return {"type": "object", "properties": {}}
 
-    if hasattr(schema, "model_json_schema"):       # Pydantic v2
+    if hasattr(schema, "model_json_schema"):
         try:
             return schema.model_json_schema()
         except Exception:
             pass
-    if hasattr(schema, "schema"):                  # Pydantic v1
+    if hasattr(schema, "schema"):
         try:
             return schema.schema()
         except Exception:
@@ -256,7 +229,6 @@ def _schema_of(tool: BaseTool) -> dict[str, Any]:
 
 
 def _build_tool_schemas(tools: list[BaseTool]) -> list[dict[str, Any]]:
-    """Build the `tools` argument for the Groq chat completion call."""
     schemas = []
     for tool in tools:
         schemas.append({
@@ -271,13 +243,41 @@ def _build_tool_schemas(tools: list[BaseTool]) -> list[dict[str, Any]]:
 
 
 # ---------------------------------------------------------------------------
+# Groq call with rate-limit retry
+# ---------------------------------------------------------------------------
+async def _groq_call_with_retry(
+    client: Any,
+    groq_sdk: Any,
+    **kwargs: Any,
+) -> Any:
+    """Call Groq with a short retry on 429. Raises the last error if it persists."""
+    last_exc: Exception | None = None
+
+    for attempt in range(GROQ_RETRY_ATTEMPTS):
+        try:
+            return await asyncio.to_thread(
+                client.chat.completions.create, **kwargs
+            )
+        except groq_sdk.RateLimitError as exc:
+            last_exc = exc
+            if attempt == GROQ_RETRY_ATTEMPTS - 1:
+                logger.error("Groq 429 persisted through retries; falling over")
+                break
+            wait = GROQ_RETRY_BASE_WAIT * (attempt + 1)
+            logger.warning(
+                "Groq 429 (attempt %d/%d) — retrying in %.0fs",
+                attempt + 1, GROQ_RETRY_ATTEMPTS, wait,
+            )
+            await asyncio.sleep(wait)
+
+    assert last_exc is not None
+    raise last_exc
+
+
+# ---------------------------------------------------------------------------
 # Tool execution
 # ---------------------------------------------------------------------------
 async def _execute_tool(tool: BaseTool, tool_input: dict[str, Any]) -> str:
-    """
-    Run a LangChain tool with the given input. Returns the output as a
-    string, JSON-serialized if it's structured.
-    """
     try:
         if hasattr(tool, "ainvoke"):
             result = await tool.ainvoke(tool_input)
@@ -286,13 +286,6 @@ async def _execute_tool(tool: BaseTool, tool_input: dict[str, Any]) -> str:
     except Exception as exc:
         logger.warning("Tool %s failed: %s", tool.name, exc)
         return f"Tool error: {exc}"
-
-    # Cap what goes back to the model. The blast-radius tool returns the
-    # full BFS result: 15 services plus every evidence path. That is 5-10
-    # KB of JSON the model reads before it can even start writing the
-    # reply, and it dominates latency on tool-calling turns. Trimming to
-    # 3000 chars keeps the substance and drops the tail.
-    TOOL_RESULT_MAX_CHARS = 3000
 
     if isinstance(result, str):
         text = result
@@ -309,6 +302,39 @@ async def _execute_tool(tool: BaseTool, tool_input: dict[str, Any]) -> str:
 
 
 # ---------------------------------------------------------------------------
+# Fallback: when Groq is fully rate-limited, ask multi_provider instead.
+# ---------------------------------------------------------------------------
+def _call_multi_provider_fallback(
+    groq_messages: list[dict[str, Any]],
+) -> str:
+    """
+    Build a plain prompt from the Groq message list and route it through
+    the multi-provider chain (Groq -> Google -> deterministic).
+    """
+    prompt_parts: list[str] = []
+    for m in groq_messages:
+        role = m.get("role", "user")
+        content = m.get("content") or ""
+        if not content:
+            continue
+        prompt_parts.append(f"{role.upper()}: {content}")
+    prompt = "\n\n".join(prompt_parts)
+
+    try:
+        result = call_ai(prompt)
+        text = (result or {}).get("text", "").strip()
+        if text:
+            return text
+    except Exception as exc:  # noqa: BLE001
+        logger.error("multi_provider fallback failed: %s", exc)
+
+    return (
+        "The assistant is briefly rate-limited. "
+        "Try again in about 30 seconds."
+    )
+
+
+# ---------------------------------------------------------------------------
 # Public chat function
 # ---------------------------------------------------------------------------
 async def chat(
@@ -318,94 +344,61 @@ async def chat(
     history: list[dict[str, Any]] | None = None,
     tools: list[BaseTool] | None = None,
 ) -> dict[str, Any]:
-    """
-    Send one message to Lya and return her response.
-
-    Steps:
-        1. Touch the session (updates timing, counts, and mood).
-        2. Scan the message for mood signals and record them.
-        3. Extract service names and record them as incidents.
-        4. Read back the full session context.
-        5. Orphan follow-up guard.
-        6. Build the message list: SYSTEM_PROMPT (+ context) first, then
-           history, then the current user turn.
-        7. Call Groq with tools. If the model wants to call a tool,
-           execute it, append the result, and call again.
-        8. Return the final text and the list of tools invoked.
-
-    Args:
-        message: The user's message text.
-        session_id: Unique session identifier (per tab/window).
-        user_id: Stable user identifier for cross-session memory.
-        history: Optional explicit history. If None, loads from memory.
-        tools: Optional tools. If None, uses ALL_TOOLS.
-
-    Returns:
-        A dict with:
-            - "response": Lya's text reply
-            - "tool_calls": list of tool names invoked
-    """
+    """Send one message to Lya and return her response."""
     # 1. Touch the session
     try:
         touch_session(user_id, session_id)
-    except Exception as exc:  # noqa: BLE001
+    except Exception as exc:
         logger.warning("touch_session failed: %s", exc)
 
     # 2. Record mood signals
     try:
         for signal in _detect_mood_signals(message):
             record_mood_signal(user_id, signal)
-    except Exception as exc:  # noqa: BLE001
+    except Exception as exc:
         logger.warning("record_mood_signal failed: %s", exc)
 
-    # 3. Record service mentions as incidents
+    # 3. Record service mentions
     try:
         for service in _extract_service_names(message):
             record_incident(user_id, service)
-    except Exception as exc:  # noqa: BLE001
+    except Exception as exc:
         logger.warning("record_incident failed: %s", exc)
 
-    # 4. Read back the session context
+    # 4. Session context
     try:
         session_ctx = get_session_context(user_id)
-    except Exception as exc:  # noqa: BLE001
+    except Exception as exc:
         logger.warning("get_session_context failed: %s", exc)
         session_ctx = {}
     context_block = _format_context_block(session_ctx)
 
-    # 5. Load history if not provided
+    # 5. History
     if history is None:
         try:
             history = get_history(session_id)
-        except Exception as exc:  # noqa: BLE001
+        except Exception as exc:
             logger.warning("get_history failed: %s", exc)
             history = []
 
     # 6. Orphan follow-up guard
     if _looks_like_orphan_followup(message, history):
         logger.info("Orphan follow-up detected — returning clarification")
-        return {
-            "response": _ORPHAN_REFUSAL,
-            "tool_calls": [],
-        }
+        return {"response": _ORPHAN_REFUSAL, "tool_calls": []}
 
-    # 7. Build Groq messages
+    # 7. Build messages
     if tools is None:
         tools = list(ALL_TOOLS)
 
     groq_messages: list[dict[str, Any]] = []
 
-    # The system prompt is the foundation of Lya's behavior: her personality,
-    # the bilingual rules, the four modes, the feminine Arabic grammar, the
-    # citation style, the push-back policy. It MUST be the first message on
-    # every call. The session context block is appended to it as a suffix so
-    # the model reads both in a single system turn.
     system_content = SYSTEM_PROMPT
     if context_block:
         system_content = f"{SYSTEM_PROMPT}\n\n---\n\n{context_block}"
     groq_messages.append({"role": "system", "content": system_content})
 
-    for turn in history or []:
+    trimmed_history = (history or [])[-HISTORY_TURN_LIMIT:]
+    for turn in trimmed_history:
         if not isinstance(turn, dict):
             continue
         role = (turn.get("role") or "user").lower()
@@ -418,34 +411,30 @@ async def chat(
 
     groq_messages.append({"role": "user", "content": message})
 
-    # Import Groq lazily so this module can still be imported if the SDK
-    # is temporarily missing — the fallback in main.py handles that case.
+    # 8. Groq client
     try:
         import groq as groq_sdk
     except ImportError as exc:
         logger.error("groq SDK not available: %s", exc)
-        return {
-            "response": "I'm not available right now. Please try again in a moment.",
-            "tool_calls": [],
-        }
+        fallback = _call_multi_provider_fallback(groq_messages)
+        return {"response": fallback, "tool_calls": []}
 
     api_key = os.getenv("GROQ_API_KEY")
     if not api_key:
         logger.error("GROQ_API_KEY missing")
-        return {
-            "response": "I'm not available right now. Please try again in a moment.",
-            "tool_calls": [],
-        }
+        fallback = _call_multi_provider_fallback(groq_messages)
+        return {"response": fallback, "tool_calls": []}
 
     client = groq_sdk.Groq(api_key=api_key, timeout=GROQ_TIMEOUT, max_retries=0)
     tool_schemas = _build_tool_schemas(tools)
     tools_used: list[str] = []
 
-    # 8. Tool-calling loop
+    # 9. Tool-calling loop
     for _ in range(MAX_TOOL_ITERATIONS):
         try:
-            response = await asyncio.to_thread(
-                client.chat.completions.create,
+            response = await _groq_call_with_retry(
+                client,
+                groq_sdk,
                 model=DEFAULT_MODEL,
                 messages=groq_messages,
                 tools=tool_schemas if tool_schemas else None,
@@ -454,10 +443,11 @@ async def chat(
                 max_tokens=MAX_TOKENS,
                 reasoning_effort="low",
             )
-        except Exception as exc:  # noqa: BLE001
-            logger.exception("Groq call failed")
+        except Exception as exc:
+            logger.exception("Groq call failed after retries — falling over to multi_provider")
+            fallback = _call_multi_provider_fallback(groq_messages)
             return {
-                "response": "I ran into a problem handling that. Please try again.",
+                "response": fallback,
                 "tool_calls": tools_used,
                 "error": str(exc),
             }
@@ -465,20 +455,13 @@ async def chat(
         choice = response.choices[0]
         msg = choice.message
 
-        # No tool calls — we're done.
         if not msg.tool_calls:
             content = msg.content or ""
-            # gpt-oss models sometimes put reasoning in a separate field
-            # and leave content empty; fall back to reasoning if needed.
             if not content:
                 reasoning = getattr(msg, "reasoning", None) or ""
                 content = reasoning
-            return {
-                "response": content,
-                "tool_calls": tools_used,
-            }
+            return {"response": content, "tool_calls": tools_used}
 
-        # Append the assistant message with its tool calls.
         groq_messages.append({
             "role": "assistant",
             "content": msg.content or "",
@@ -495,7 +478,6 @@ async def chat(
             ],
         })
 
-        # Execute each requested tool.
         for tc in msg.tool_calls:
             tool_name = tc.function.name
             tools_used.append(tool_name)
@@ -517,9 +499,6 @@ async def chat(
                 "content": result_str,
             })
 
-    # Exceeded max iterations.
     logger.warning("Agent loop hit max iterations (%d)", MAX_TOOL_ITERATIONS)
-    return {
-        "response": "I couldn't finish that request in time. Please try rephrasing.",
-        "tool_calls": tools_used,
-    }
+    fallback = _call_multi_provider_fallback(groq_messages)
+    return {"response": fallback, "tool_calls": tools_used}

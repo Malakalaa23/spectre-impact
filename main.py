@@ -17,30 +17,17 @@ Endpoints:
     POST /api/stt                 — speech-to-text (Whisper).
     POST /api/feedback            — record user feedback on an AI output.
     GET  /api/feedback/stats      — aggregate feedback counts (accuracy).
-
-Design notes:
-    - BFS delegates to backend.analysis.change_analysis_engine.analyze_impact().
-    - Chat endpoints use chat.agent + chat.memory + chat.safety.
-    - TTS uses ai.tts (Edge TTS, English + Egyptian Arabic).
-    - STT uses ai.stt (faster-whisper, Egyptian Arabic + English).
-    - A background task auto-fires synthetic PR events every 30 seconds.
-    - user_id is preferred over session_id for cross-session memory; the
-      server sets a signed cookie on first contact and reuses it after.
-    - Every analyzed PR is added to the RAG knowledge base (learning loop),
-      so future queries can cite it as a past incident.
-    - calculate_blast_radius() returns the FULL BFS result, including the
-      evidence path chain and the deterministic severity.
-    - Heavy models (STT, embeddings) AND the ChromaDB collection are
-      pre-loaded at startup so the first user request is fast.
-    - HuggingFace Hub is forced offline BEFORE any model library is
-      imported, otherwise sentence-transformers/transformers will try to
-      reach huggingface.co on first use.
+    POST /api/review              — code review (called by Code_Review page).
+    POST /api/rollback            — dry-run or execute rollback (Rollback Center).
+    GET  /api/audit               — recent rollback audit log entries.
+    POST /api/voice/{pr}          — short spoken summary for a PR.
+    POST /api/parse-terraform     — parse Terraform at a server-side path.
+    GET  /api/parse-terraform/sample      — parse the bundled demo Terraform dir.
+    GET  /api/parse-terraform/sample/html — visual graph view of the parse.
 """
 
 # ---------------------------------------------------------------------------
-# CRITICAL: force HuggingFace Hub offline BEFORE any model library is
-# imported. This must run before `from sentence_transformers import ...`,
-# `from transformers import ...`, or anything that touches huggingface_hub.
+# CRITICAL: force HuggingFace Hub offline BEFORE any model library is imported.
 # ---------------------------------------------------------------------------
 import os
 
@@ -64,7 +51,7 @@ from collections import deque
 from fastapi import BackgroundTasks, FastAPI, Request, HTTPException, UploadFile, File, Form
 from fastapi.responses import Response
 from starlette.middleware.sessions import SessionMiddleware
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, Field, field_validator
 from dotenv import load_dotenv
 from github import Github, GithubException, Auth
 
@@ -145,7 +132,7 @@ except ImportError as e:
         }
 
 
-# AI agent
+# AI agent (PR pipeline: insights + code review ensemble)
 try:
     from ai_agent_groq import (
         generate_insights,
@@ -247,6 +234,17 @@ except ImportError as e:
         raise RuntimeError("STT module not available")
 
 
+# Terraform parser — onboarding demo. Mounts /api/parse-terraform/*.
+# Import is guarded so a missing python-hcl2 or a broken terraform_parser
+# never takes the whole app down; the CLI still works independently.
+try:
+    from terraform_api import router as terraform_router
+    app.include_router(terraform_router)
+    log("Terraform parser router mounted at /api/parse-terraform")
+except ImportError as e:
+    log(f"Terraform parser import failed: {e}")
+
+
 # -------------------------------------------------------------------
 # Landing page presets (bilingual)
 # -------------------------------------------------------------------
@@ -310,17 +308,7 @@ LANDING_PRESETS: dict[str, dict[str, Any]] = {
 # Blast radius
 # -------------------------------------------------------------------
 def calculate_blast_radius(changed_files: list[str]) -> dict[str, Any]:
-    """
-    Run the BFS engine and return the full analysis.
-
-    Downstream consumers rely on the full dict, not just the three
-    fields we display in the UI:
-        - evidence           — rendered as the evidence chain in the PR comment
-        - severity           — deterministic severity, overrides the AI's guess
-        - deployment_strategy, rollback_required, confidence
-        - affected_apis, affected_frontends, affected_customer_journeys,
-          affected_business_capabilities
-    """
+    """Run the BFS engine and return the full analysis."""
     if not changed_files:
         return {
             "changed_resource": "unknown",
@@ -431,40 +419,29 @@ async def _start_live_demo_stream() -> None:
 
 @app.on_event("startup")
 async def _preload_heavy_models() -> None:
-    """
-    Pre-load AND warm every heavy model at startup.
+    """Pre-load and warm every heavy model at startup."""
+    # Render's free tier has 512MB RAM. Preloading Whisper will crash it.
+    # We detect Render via a standard environment variable and skip STT.
+    is_render = os.getenv("RENDER", "false").lower() == "true"
+    
+    if is_render:
+        log("Render environment detected. Skipping heavy model preloading to prevent OOM.")
+        return
 
-    Why this matters:
-        - Loading the STT weights is only half the cost. The first real
-          inference on a cold process also pays for CTranslate2 JIT
-          compiling its CPU kernels and the Silero VAD model loading.
-          Combined that's 60-90 seconds. We warm up with a silent clip.
-
-        - The embedding model has the same problem: loading the weights
-          is fast, but the first `encode()` call triggers sentence-
-          transformers' JIT compilation of its CPU kernels. That's
-          15-20 seconds on a cold process, all paid by the first user
-          query. We run a dummy encode at boot to warm it.
-
-        - The persistent ChromaDB client is the entire remaining cold-
-          start cost for RAG. Opening it at boot means the first chat
-          message that calls search_knowledge_base is instant.
-
-    Failures are logged and swallowed — a model that fails to load
-    should not prevent the rest of the app from starting.
-    """
-    # Pre-load STT, then warm it up.
     try:
         from ai.stt import _get_model as _stt_get_model, warmup as _stt_warmup
         await asyncio.to_thread(_stt_get_model)
         log("STT model pre-loaded")
+        try:
+            from ai.stt import warmup_with_speech as _stt_warmup_speech
+            await _stt_warmup_speech()
+        except Exception as exc:
+            log(f"STT speech warmup failed: {exc}")
         await _stt_warmup()
     except Exception as exc:
         log(f"STT pre-load failed (will load on first use): {exc}")
 
-    # Pre-load RAG embeddings, warm the encoder, and open the ChromaDB
-    # collection. The encode() call is what triggers the JIT compilation,
-    # so it must actually run once before the first user query.
+    # RAG preloading is lighter, keep it but wrap it tightly
     try:
         from rag.vector_store import (
             _get_model as _embed_get_model,
@@ -473,45 +450,13 @@ async def _preload_heavy_models() -> None:
         )
         await asyncio.to_thread(_embed_get_model)
         log("Embedding model pre-loaded")
-
         await asyncio.to_thread(_embed_encode, "warmup query")
         log("Embedding encoder warmed")
-
         await asyncio.to_thread(get_collection)
         log("ChromaDB collection pre-opened")
     except Exception as exc:
         log(f"RAG pre-load failed (will load on first use): {exc}")
 
-    # Warm the chat agent. The point is to pay lazy-import and
-    # network-handshake cost at boot instead of on the first real user.
-    # We deliberately do NOT call lya_chat(): that runs two Groq calls
-    # (tool-plan + reply), which on the free tier burns the rate limit
-    # immediately and forces a 14-second retry for the next caller.
-    # One raw SDK call is enough to warm the SDK, DNS, and TLS.
-    try:
-        import groq as _groq_sdk
-        _key = os.getenv("GROQ_API_KEY")
-        if _key:
-            def _one_warmup_call():
-                c = _groq_sdk.Groq(api_key=_key, timeout=20.0, max_retries=0)
-                c.chat.completions.create(
-                    model="openai/gpt-oss-20b",
-                    messages=[{"role": "user", "content": "ok"}],
-                    max_tokens=4,
-                )
-            await asyncio.to_thread(_one_warmup_call)
-            log("Chat agent warmed")
-        else:
-            log("Chat warmup skipped: GROQ_API_KEY not set")
-    except Exception as exc:
-        log(f"Chat warmup failed (will load on first use): {exc}")
-
-    # Warm the chat agent. The point is to pay lazy-import and
-    # network-handshake cost at boot instead of on the first real user.
-    # We deliberately do NOT call lya_chat(): that runs two Groq calls
-    # (tool-plan + reply), which on the free tier burns the rate limit
-    # immediately and forces a 14-second retry for the next caller.
-    # One raw SDK call is enough to warm the SDK, DNS, and TLS.
     try:
         import groq as _groq_sdk
         _key = os.getenv("GROQ_API_KEY")
@@ -566,6 +511,236 @@ class TTSRequest(BaseModel):
     text: str = Field(..., min_length=1, max_length=8000)
     language: str = Field("auto", pattern="^(auto|ar|en)$")
     voice: str | None = None
+
+
+# -------------------------------------------------------------------
+# Compatibility endpoints — called by the frontend pages
+# -------------------------------------------------------------------
+#
+# The Streamlit pages send `pr_number` in whatever form the PR list
+# uses. Depending on how data.py shapes the list, that can be an int
+# (445), a plain string ("445"), or a prefixed string ("#445" /
+# "PR-445"). Rather than fail with a 422, we coerce every accepted
+# shape to a plain int here.
+def _coerce_pr_number(v: Any) -> int:
+    """Normalise any of {int, '445', '#445', 'PR-445'} to 445."""
+    if isinstance(v, int):
+        return v
+    if isinstance(v, str):
+        digits = re.sub(r"\D", "", v)
+        if digits:
+            return int(digits)
+    raise ValueError(f"Cannot parse PR number from {v!r}")
+
+
+class ReviewRequest(BaseModel):
+    pr_number: int
+    repository: str = Field("", max_length=255)
+    changed_files: list[str] = []
+
+    @field_validator("pr_number", mode="before")
+    @classmethod
+    def _pr_number_validator(cls, v):
+        return _coerce_pr_number(v)
+
+
+class RollbackRequest(BaseModel):
+    pr_number: int
+    action: str = "dry_run"
+    confirm: str | None = None
+    reauth_user: str | None = None
+
+    @field_validator("pr_number", mode="before")
+    @classmethod
+    def _pr_number_validator(cls, v):
+        return _coerce_pr_number(v)
+
+
+@app.post("/api/review")
+async def review_endpoint(req: ReviewRequest) -> dict[str, Any]:
+    """
+    Run the code review pipeline on a PR and flatten the result into
+    the shape the Code_Review.py page expects.
+
+    full_review() returns nested dicts (semgrep, bandit, radon, ai_review).
+    The frontend reads `summary` and `findings` at the top level, so we
+    flatten everything into a single findings array with a type tag.
+    """
+    log(f"/api/review pr={req.pr_number} repo={req.repository} files={len(req.changed_files)}")
+
+    diff = ""
+    if GITHUB_TOKEN:
+        try:
+            commit_sha = get_commit_sha_from_pr(req.repository, req.pr_number)
+            if commit_sha:
+                diff = fetch_commit_diff(req.repository, commit_sha)
+        except Exception as exc:
+            log(f"/api/review diff fetch failed: {exc}")
+
+    try:
+        from code_review.reviewer import full_review
+        raw = await asyncio.to_thread(full_review, diff, ".", None)
+    except Exception as exc:
+        log(f"/api/review failed: {exc}\n{traceback.format_exc()}")
+        raise HTTPException(status_code=500, detail=f"Review failed: {exc}") from exc
+
+    raw = dict(raw or {})
+
+    findings: list[dict[str, Any]] = []
+
+    def _add(kind: str, severity: str, message: str, file: str | None = None) -> None:
+        entry = {"type": kind, "severity": severity, "message": str(message)}
+        if file:
+            entry["file"] = file
+        findings.append(entry)
+
+    for tool in ("semgrep", "bandit", "radon"):
+        block = raw.get(tool) or {}
+        for item in block.get("findings", []) or []:
+            if isinstance(item, dict):
+                _add(
+                    tool,
+                    item.get("severity", "Medium"),
+                    item.get("message") or item.get("text") or str(item),
+                    item.get("file"),
+                )
+            else:
+                _add(tool, "Medium", str(item))
+
+    ai = raw.get("ai_review") or {}
+    for bug in ai.get("bugs_found", []) or []:
+        _add("bug", "High", bug)
+    for sec in ai.get("security_issues", []) or []:
+        _add("security", "Critical", sec)
+    for test in ai.get("missing_tests", []) or []:
+        _add("test", "Medium", test)
+    for sug in ai.get("suggestions", []) or []:
+        _add("suggestion", "Medium", sug)
+
+    quality = ai.get("code_quality", "Unknown")
+    verdict = ai.get("overall_verdict", "Unknown")
+    summary = f"Code quality: {quality}. Verdict: {verdict}. {len(findings)} finding(s)."
+
+    return {
+        "summary": summary,
+        "findings": findings,
+        "diffs": diff[:8000] if diff else "",
+        "changed_files": raw.get("changed_files") or req.changed_files,
+        "semgrep": raw.get("semgrep"),
+        "bandit": raw.get("bandit"),
+        "radon": raw.get("radon"),
+        "ai_review": ai,
+    }
+
+
+@app.post("/api/rollback")
+async def rollback_endpoint(req: RollbackRequest) -> dict[str, Any]:
+    """
+    Dry-run or execute the rollback plan associated with a PR.
+
+    Execution requires confirm="CONFIRM" and a non-empty reauth_user.
+    """
+    log(f"/api/rollback pr={req.pr_number} action={req.action}")
+
+    analysis = get_pr_analysis(req.pr_number)
+    if not analysis:
+        raise HTTPException(status_code=404, detail=f"No analysis for PR #{req.pr_number}")
+
+    latest = analysis[0] if isinstance(analysis, list) else analysis
+
+    raw_steps = latest.get("rollback") or []
+    if isinstance(raw_steps, str):
+        try:
+            parsed = json.loads(raw_steps)
+            steps = parsed if isinstance(parsed, list) else [raw_steps]
+        except json.JSONDecodeError:
+            steps = [raw_steps] if raw_steps else []
+    else:
+        steps = [str(s) for s in raw_steps if s]
+
+    if not steps:
+        return {"message": "No rollback plan available for this PR.", "results": [], "dry_run": True}
+
+    is_dry_run = req.action != "execute"
+    if not is_dry_run:
+        if (req.confirm or "").strip() != "CONFIRM":
+            raise HTTPException(status_code=400, detail="Confirmation required")
+        if not (req.reauth_user or "").strip():
+            raise HTTPException(status_code=400, detail="Re-authentication required")
+
+    try:
+        from rollback_executor import execute_rollback
+        result = await asyncio.to_thread(execute_rollback, steps, dry_run=is_dry_run)
+    except Exception as exc:
+        log(f"/api/rollback failed: {exc}\n{traceback.format_exc()}")
+        raise HTTPException(status_code=500, detail=f"Rollback failed: {exc}") from exc
+
+    results = (result or {}).get("results", [])
+    if is_dry_run:
+        msg = f"Dry run completed. {len(results)} step(s) simulated."
+    else:
+        msg = f"Rollback executed. {len(results)} step(s) processed."
+
+    return {"message": msg, "results": results, "dry_run": is_dry_run}
+
+
+@app.get("/api/audit")
+def audit_endpoint(limit: int = 50) -> dict[str, Any]:
+    """Return recent rollback audit log entries, newest first."""
+    limit = max(1, min(limit, 500))
+    from database import _get_connection
+    conn = _get_connection()
+    try:
+        rows = conn.execute(
+            "SELECT * FROM rollback_audit_log ORDER BY id DESC LIMIT ?",
+            (limit,),
+        ).fetchall()
+        entries = [dict(row) for row in rows]
+    finally:
+        conn.close()
+    return {"count": len(entries), "entries": entries}
+
+
+@app.post("/api/voice/{pr_number}")
+async def voice_endpoint(pr_number: int):
+    """Synthesize a short spoken summary of PR #N. Returns MP3 bytes."""
+    log(f"/api/voice pr={pr_number}")
+
+    analysis = get_pr_analysis(pr_number)
+    if not analysis:
+        raise HTTPException(status_code=404, detail=f"No analysis for PR #{pr_number}")
+
+    latest = analysis[0] if isinstance(analysis, list) else analysis
+    affected = latest.get("affected_services") or []
+    if isinstance(affected, str):
+        try:
+            affected = json.loads(affected)
+        except json.JSONDecodeError:
+            affected = [affected]
+    impact = latest.get("business_impact", 0)
+    severity = latest.get("severity") or "Unknown"
+
+    text = (
+        f"Pull request number {pr_number}. "
+        f"Severity {severity}. "
+        f"Business impact {impact} percent. "
+        f"{len(affected)} services affected."
+    )
+
+    try:
+        audio = await tts_synthesize(text, language="en", voice=None)
+    except Exception as exc:
+        log(f"/api/voice synth failed: {exc}")
+        raise HTTPException(status_code=500, detail="Voice synthesis failed") from exc
+
+    if not audio:
+        raise HTTPException(status_code=500, detail="Voice synthesis produced empty audio")
+
+    return Response(
+        content=audio,
+        media_type="audio/mpeg",
+        headers={"Cache-Control": "no-store"},
+    )
 
 
 # -------------------------------------------------------------------
@@ -751,23 +926,14 @@ def feedback_recent(limit: int = 20) -> dict[str, Any]:
 async def tts_endpoint(req: TTSRequest):
     log(f"/api/tts lang={req.language} chars={len(req.text)}")
 
-    # Strip markdown, filenames, and technical punctuation before synthesis.
-    # Edge TTS reads `**bold**` as "asterisk asterisk bold", file paths as
-    # "customer underscore database dot tee eff", and bare slashes as
-    # "slash". None of that is what a person would say. We clean it all
-    # here, after the API call but before Edge TTS sees the string.
     clean_text = req.text
+    clean_text = re.sub(r"\*\*(.+?)\*\*", r"\1", clean_text)
+    clean_text = re.sub(r"\*(.+?)\*", r"\1", clean_text)
+    clean_text = re.sub(r"`([^`]+)`", r"\1", clean_text)
+    clean_text = re.sub(r"^#{1,6}\s+", "", clean_text, flags=re.M)
+    clean_text = re.sub(r"^\s*\|.*\|\s*$", "", clean_text, flags=re.M)
+    clean_text = re.sub(r"^\s*[-*]\s+", "", clean_text, flags=re.M)
 
-    # Markdown formatting
-    clean_text = re.sub(r"\*\*(.+?)\*\*", r"\1", clean_text)       # **bold**
-    clean_text = re.sub(r"\*(.+?)\*", r"\1", clean_text)           # *italic*
-    clean_text = re.sub(r"`([^`]+)`", r"\1", clean_text)           # `code`
-    clean_text = re.sub(r"^#{1,6}\s+", "", clean_text, flags=re.M) # # headers
-    clean_text = re.sub(r"^\s*\|.*\|\s*$", "", clean_text, flags=re.M)  # tables
-    clean_text = re.sub(r"^\s*[-*]\s+", "", clean_text, flags=re.M)     # bullets
-
-    # File extensions — spell them the way a person reads them aloud.
-    # These run before we strip dots, so the extension is still intact.
     clean_text = re.sub(r"\.tf\b", " tee eff", clean_text)
     clean_text = re.sub(r"\.py\b", " pie", clean_text)
     clean_text = re.sub(r"\.jsx\b", " jay ess ex", clean_text)
@@ -777,19 +943,23 @@ async def tts_endpoint(req: TTSRequest):
     clean_text = re.sub(r"\.yml\b", " yammel", clean_text)
     clean_text = re.sub(r"\.md\b", " markdown", clean_text)
 
-    # Filenames and identifiers: underscores, slashes, and dashes become
-    # spaces. "customer_database" → "customer database". "services/payment"
-    # → "services payment".
     clean_text = re.sub(r"(?<=\w)_(?=\w)", " ", clean_text)
     clean_text = re.sub(r"(?<=\w)/(?=\w)", " ", clean_text)
     clean_text = re.sub(r"(?<=\w)-(?=\w)", " ", clean_text)
-
-    # Remaining bare slashes, asterisks, backticks, pipes, brackets.
     clean_text = re.sub(r"[*/`|\[\]{}]", " ", clean_text)
 
-    # Collapse whitespace and paragraph breaks.
     clean_text = re.sub(r"\n{2,}", ". ", clean_text)
     clean_text = re.sub(r"\s+", " ", clean_text).strip()
+
+    TTS_MAX_CHARS = 350
+    if len(clean_text) > TTS_MAX_CHARS:
+        cut = clean_text[:TTS_MAX_CHARS]
+        last_period = max(cut.rfind(". "), cut.rfind("! "), cut.rfind("? "))
+        if last_period > 100:
+            clean_text = cut[:last_period + 1]
+        else:
+            clean_text = cut + "..."
+        log(f"/api/tts capped to {len(clean_text)} chars")
 
     if not clean_text:
         raise HTTPException(status_code=400, detail="Nothing to speak")
@@ -1179,151 +1349,6 @@ def metrics():
     total_prs = len(analyses)
     high_risk_prs = sum(1 for a in analyses if a.get("severity") in ("Critical", "High"))
     return {"total_prs": total_prs, "high_risk_prs": high_risk_prs}
-
-
-
-
-# -------------------------------------------------------------------
-# Compatibility endpoints — called by the frontend pages
-# -------------------------------------------------------------------
-class ReviewRequest(BaseModel):
-    pr_number: int
-    repository: str
-    changed_files: list[str] = []
-
-
-class RollbackRequest(BaseModel):
-    pr_number: int
-    action: str = "dry_run"          # "dry_run" or "execute"
-    confirm: str | None = None       # must be "CONFIRM" for execute
-    reauth_user: str | None = None   # engineering username for execute
-
-
-@app.post("/api/review")
-async def review_endpoint(req: ReviewRequest) -> dict[str, Any]:
-    """
-    Run the code review pipeline on a PR. Fetches the diff, runs static
-    analysis + AI review, returns the full_review dict.
-    """
-    log(f"/api/review pr={req.pr_number} repo={req.repository} files={len(req.changed_files)}")
-
-    diff = ""
-    if GITHUB_TOKEN:
-        try:
-            commit_sha = get_commit_sha_from_pr(req.repository, req.pr_number)
-            if commit_sha:
-                diff = fetch_commit_diff(req.repository, commit_sha)
-        except Exception as exc:
-            log(f"/api/review diff fetch failed: {exc}")
-
-    try:
-        from code_review.reviewer import full_review
-        result = await asyncio.to_thread(full_review, diff, ".")
-    except Exception as exc:
-        log(f"/api/review failed: {exc}")
-        raise HTTPException(status_code=500, detail=f"Review failed: {exc}") from exc
-
-    result = dict(result or {})
-    result.setdefault("changed_files", req.changed_files)
-    result["pr_number"] = req.pr_number
-    result["repository"] = req.repository
-    return result
-
-
-@app.post("/api/rollback")
-async def rollback_endpoint(req: RollbackRequest) -> dict[str, Any]:
-    """
-    Dry-run or execute the rollback plan associated with a PR.
-
-    Execution requires confirm="CONFIRM" and a non-empty reauth_user.
-    """
-    log(f"/api/rollback pr={req.pr_number} action={req.action}")
-
-    analysis = get_pr_analysis(req.pr_number)
-    if not analysis:
-        raise HTTPException(status_code=404, detail=f"No analysis for PR #{req.pr_number}")
-
-    steps = analysis.get("rollback") or []
-    if not steps:
-        return {"message": "No rollback plan available for this PR.", "results": [], "dry_run": True}
-
-    is_dry_run = req.action != "execute"
-    if not is_dry_run:
-        if (req.confirm or "").strip() != "CONFIRM":
-            raise HTTPException(status_code=400, detail="Confirmation required")
-        if not (req.reauth_user or "").strip():
-            raise HTTPException(status_code=400, detail="Re-authentication required")
-
-    try:
-        from rollback_executor import execute_rollback
-        result = await asyncio.to_thread(execute_rollback, steps, dry_run=is_dry_run)
-    except Exception as exc:
-        log(f"/api/rollback failed: {exc}")
-        raise HTTPException(status_code=500, detail=f"Rollback failed: {exc}") from exc
-
-    results = (result or {}).get("results", [])
-    if is_dry_run:
-        msg = f"Dry run completed. {len(results)} step(s) simulated."
-    else:
-        msg = f"Rollback executed. {len(results)} step(s) processed."
-
-    return {"message": msg, "results": results, "dry_run": is_dry_run}
-
-
-@app.get("/api/audit")
-def audit_endpoint(limit: int = 50) -> dict[str, Any]:
-    """Return recent rollback audit log entries, newest first."""
-    limit = max(1, min(limit, 500))
-    from database import _get_connection
-    conn = _get_connection()
-    cur = conn.cursor()
-    cur.execute(
-        "SELECT * FROM rollback_audit_log ORDER BY id DESC LIMIT ?",
-        (limit,),
-    )
-    rows = cur.fetchall()
-    cols = [d[0] for d in cur.description] if cur.description else []
-    entries = [dict(zip(cols, row)) for row in rows]
-    return {"count": len(entries), "entries": entries}
-
-
-@app.post("/api/voice/{pr_number}")
-async def voice_endpoint(pr_number: int):
-    """
-    Synthesize a short spoken summary of PR #N. Returns MP3 bytes.
-    The frontend's PR Analysis page hits this to play the verdict aloud.
-    """
-    log(f"/api/voice pr={pr_number}")
-
-    analysis = get_pr_analysis(pr_number)
-    if not analysis:
-        raise HTTPException(status_code=404, detail=f"No analysis for PR #{pr_number}")
-
-    affected = analysis.get("affected_services") or []
-    impact = analysis.get("business_impact", 0)
-    severity = analysis.get("severity") or "Unknown"
-
-    text = (
-        f"Pull request number {pr_number}. "
-        f"Severity {severity}. "
-        f"Business impact {impact} percent. "
-        f"{len(affected)} services affected."
-    )
-
-    try:
-        audio = await tts_synthesize(text, language="en", voice=None)
-    except Exception as exc:
-        log(f"/api/voice synth failed: {exc}")
-        raise HTTPException(status_code=500, detail="Voice synthesis failed") from exc
-
-    if not audio:
-        raise HTTPException(status_code=500, detail="Voice synthesis produced empty audio")
-
-    return Response(
-        content=audio,
-        media_type="audio/mpeg",
-        headers={"Cache-Control": "no-store"},
-    )
 
 
 # -------------------------------------------------------------------

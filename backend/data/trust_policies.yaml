@@ -1,0 +1,81 @@
+# Trust-layer policy documents.
+#
+# These are the answers to the questions enterprises ask before they
+# will let an AI tool touch production. Each entry becomes a document
+# in the RAG corpus with `doc_type: policy`. Lya cites them verbatim.
+#
+# To add a policy: append a new entry with a unique `id`. Then re-run
+# `python -m rag.populate --reset` to rebuild the collection.
+
+policies:
+
+  - id: policy_rollback_certification
+    title: Rollback Certification
+    body: >
+      Spectre Impact does not auto-execute rollbacks. Every rollback plan
+      is a deterministic checklist derived from the dependency graph, not
+      from the AI. Every command in the plan passes through a two-stage
+      executor: first a dangerous-substring check, then a strict whitelist
+      regex. Anything that does not match one of the known-safe patterns —
+      kubectl rollout undo, kubectl rollout status, docker service update
+      --rollback, or git revert --no-edit — is blocked and never executed.
+      Every attempt, blocked or successful, is written to the
+      rollback_audit_log table with a user ID and a UTC timestamp. Human
+      approval is required before any command runs.
+
+  - id: policy_soc2
+    title: SOC 2 Compliance Status
+    body: >
+      SOC 2 Type One certification is on the roadmap for Q1 2027. The
+      controls required — audit logging, access control, data retention,
+      encryption in transit and at rest — are already implemented in the
+      codebase. The certification itself is a third-party audit that will
+      be scheduled after the conference. The audit log table, the
+      deterministic rollback executor, and the output secret-redaction
+      layer are all SOC 2 evidence artifacts.
+
+  - id: policy_data_handling
+    title: Data Handling and Privacy
+    body: >
+      Spectre Impact does not store customer source code. Embeddings for
+      the RAG corpus are generated locally with the IBM granite
+      granite-embedding-97m-multilingual-r2 model, which runs on CPU.
+      No embedding API call leaves the machine. The only outbound traffic
+      is to the configured LLM provider — Groq, OpenAI, or Anthropic —
+      and only for the text of the specific analysis request. There is no
+      telemetry. There is no analytics. The database is a local SQLite
+      file at history.db. Customer keys stay in .env on the local
+      filesystem.
+
+  - id: policy_safety_layer
+    title: Safety Layer
+    body: >
+      Every user message passes through chat.safety.sanitize_input before
+      it reaches the AI. The sanitizer blocks prompt injection patterns,
+      secret-harvesting prompts, and destructive-command instructions.
+      Blocked inputs return HTTP 400 and never reach the model. Every AI
+      response passes through chat.safety.sanitize_output, which redacts
+      Groq, OpenAI, Anthropic, GitHub, and AWS keys, JSON Web Tokens,
+      and hexadecimal secrets before they appear in the chat or the PR
+      comment.
+
+  - id: policy_multi_provider
+    title: Multi-Provider Fallback
+    body: >
+      Every AI call is issued to Groq first. If Groq is unavailable,
+      times out, or returns an error, the call is retried against OpenAI,
+      then Anthropic. If all three providers fail, the system returns a
+      deterministic fallback message so the pipeline never crashes. This
+      chain is implemented in ai/multi_provider.py and is exercised by
+      the test_spectre.py providers group on every test run.
+
+  - id: policy_human_approval
+    title: Human Approval Gate
+    body: >
+      No change is shipped by Spectre Impact without a human clicking
+      approve. The tool posts a recommendation on the Pull Request; it
+      does not merge, does not push, and does not execute rollback
+      commands without an explicit confirmation step. The Rollback
+      Center requires the user to type the word CONFIRM and to
+      re-authenticate as an engineering username before the executor
+      will run any command. This is the design, not a limitation.

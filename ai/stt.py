@@ -211,3 +211,65 @@ async def transcribe_async(
         raise ValueError("Empty audio")
 
     return await asyncio.to_thread(_transcribe_sync, audio_bytes, language)
+
+
+# ---------------------------------------------------------------------------
+# Real-speech warmup
+# ---------------------------------------------------------------------------
+# The tone-based warmup below (or above) does not work: Silero VAD strips
+# the entire silent clip before the encoder runs, so the JIT compile still
+# happens on the first real user recording. This warmup generates 2 seconds
+# of real speech via Edge TTS, caches it to disk, and runs it through the
+# same transcribe path the API uses.
+
+_WARMUP_SPEECH_CACHE = None
+
+
+async def warmup_with_speech() -> None:
+    """
+    Warm the STT encoder and decoder with real speech. Cached to disk so
+    the cost is paid once per machine, not once per process.
+    """
+    global _WARMUP_SPEECH_CACHE
+
+    cache_path = _warmup_speech_path()
+
+    # Synthesize once, reuse forever.
+    if not cache_path.exists():
+        try:
+            import edge_tts
+            communicate = edge_tts.Communicate(
+                "This is a warmup for the speech recognition system.",
+                "en-US-AriaNeural",
+            )
+            with open(cache_path, "wb") as f:
+                async for chunk in communicate.stream():
+                    if chunk["type"] == "audio":
+                        f.write(chunk["data"])
+            logger.info("STT warmup speech cached at %s", cache_path)
+        except Exception as exc:
+            logger.warning("STT warmup speech generation failed: %s", exc)
+            return
+
+    if not cache_path.exists():
+        return
+
+    try:
+        audio_bytes = cache_path.read_bytes()
+    except Exception as exc:
+        logger.warning("STT warmup cache unreadable: %s", exc)
+        return
+
+    try:
+        await transcribe_async(audio_bytes, language="en")
+        logger.info("STT real-speech warmup complete (%d bytes)", len(audio_bytes))
+    except Exception as exc:
+        logger.warning("STT real-speech warmup failed: %s", exc)
+
+
+def _warmup_speech_path():
+    from pathlib import Path as _Path
+    cache_dir = _Path(__file__).resolve().parents[1] / ".cache"
+    cache_dir.mkdir(exist_ok=True)
+    return cache_dir / "stt_warmup_speech.mp3"
+

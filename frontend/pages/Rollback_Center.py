@@ -5,7 +5,7 @@ from data import get_pr_data, get_pr_details
 from api_client import post_json_detailed, get_json
 from style import apply_style, sidebar, empty_state
 
-st.set_page_config(page_title="Rollback Center | Spectre", page_icon="🔄", layout="wide")
+st.set_page_config(page_title="Rollback Center | Spectre", page_icon="🔁", layout="wide")
 apply_style()
 sidebar("Rollback Center")
 
@@ -25,7 +25,7 @@ reauth_key = f"rollback_reauthenticated_{selected}"
 status = st.session_state.get(status_key, "idle")
 label = {"idle":"READY","pending":"PENDING","executing":"EXECUTING","complete":"COMPLETE","failed":"FAILED"}.get(status,"READY")
 
-st.title("🔄 Rollback Center")
+st.title("🔁 Rollback Center")
 st.caption("Review the plan first. Execution requires explicit confirmation and re-authentication.")
 st.markdown(f"<span class='spectre-status {html.escape(status)}'>● {html.escape(label)}</span>", unsafe_allow_html=True)
 
@@ -46,28 +46,75 @@ if st.button("🧪 Dry Run", use_container_width=True, help="Simulate the rollba
 
 st.divider()
 st.subheader("⚠️ Execute Rollback")
+
 confirm_key = f"rollback_confirm_{selected}"
+username_key = f"rollback_reauth_user_{selected}"
 
 # A widget's value can only be reset BEFORE the widget is created, so the
 # previous run leaves a flag here instead of writing to the key directly.
 if st.session_state.pop(f"rollback_reset_{selected}", False):
     st.session_state[confirm_key] = ""
+    st.session_state[username_key] = ""
 
-confirm = st.text_input("Type CONFIRM", key=confirm_key, help="Type CONFIRM exactly to enable rollback execution.")
-reauth_user = st.text_input("Re-authenticate as", placeholder="Your engineering username", key=f"rollback_reauth_user_{selected}", help="Enter the engineering username used for the re-authentication check.")
+confirm = st.text_input(
+    "Type CONFIRM",
+    key=confirm_key,
+    help="Type CONFIRM exactly to enable rollback execution.",
+)
+reauth_user = st.text_input(
+    "Re-authenticate as",
+    placeholder="Your engineering username",
+    key=username_key,
+    help="Enter the engineering username used for the re-authentication check.",
+)
 
-if st.button("🔐 Re-authenticate", use_container_width=True, disabled=not reauth_user.strip(), help="Perform the required re-authentication check."):
+# On-screen hints so the presenter is never stuck guessing which step is next.
+already_reauthed = st.session_state.get(reauth_key, False)
+
+if not already_reauthed:
+    if not reauth_user.strip():
+        st.caption("Step 1 of 2 — type a username above.")
+    elif confirm.strip() != "CONFIRM":
+        st.caption("Step 2 of 2 — type CONFIRM above.")
+    else:
+        st.caption("Ready. Click **🔐 Re-authenticate** to unlock execution.")
+
+if st.button(
+    "🔐 Re-authenticate",
+    use_container_width=True,
+    disabled=(not reauth_user.strip()) or already_reauthed,
+    help="Perform the required re-authentication check.",
+):
     st.session_state[reauth_key] = True
     st.success(f"Re-authentication check passed for {reauth_user.strip()}.")
 
 can_execute = confirm.strip() == "CONFIRM" and st.session_state.get(reauth_key, False)
-if st.button("Execute Rollback", type="primary", disabled=not can_execute, use_container_width=True, help="Execute the confirmed rollback."):
+
+if not can_execute and st.session_state.get(reauth_key, False):
+    st.caption("Re-authenticated. Type CONFIRM above to enable Execute.")
+
+if st.button(
+    "Execute Rollback",
+    type="primary",
+    disabled=not can_execute,
+    use_container_width=True,
+    help="Execute the confirmed rollback.",
+):
     st.session_state[status_key] = "executing"
     try:
         with st.spinner("Executing rollback..."):
             ok, result, _ = post_json_detailed(
                 "/api/rollback",
-                {"pr_number": selected, "action":"execute", "confirmation":"CONFIRM", "reauthenticated":True, "username":reauth_user.strip()},
+                {
+                    "pr_number": selected,
+                    "action": "execute",
+                    # Field names must match RollbackRequest in main.py.
+                    # Older versions sent "confirmation"/"username" which
+                    # the backend silently ignored, causing a 400 before
+                    # the executor ever ran.
+                    "confirm": "CONFIRM",
+                    "reauth_user": reauth_user.strip(),
+                },
                 timeout=90,
             )
         st.session_state[status_key] = "complete" if ok else "failed"

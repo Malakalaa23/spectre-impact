@@ -1,33 +1,31 @@
 FROM python:3.11-slim
 
+# Install system dependencies
+# ffmpeg is REQUIRED for Whisper STT
+# build-essential is required for some Python packages
 RUN apt-get update && apt-get install -y --no-install-recommends \
     build-essential \
+    ffmpeg \
     git \
     curl \
-    supervisor \
     && rm -rf /var/lib/apt/lists/*
 
-RUN useradd -m -u 1000 user
-USER user
-ENV HOME=/home/user \
-    PATH=/home/user/.local/bin:$PATH \
-    PYTHONUNBUFFERED=1 \
-    PYTHONDONTWRITEBYTECODE=1 \
-    HF_HOME=/home/user/.cache/huggingface \
-    TRANSFORMERS_CACHE=/home/user/.cache/huggingface \
-    SENTENCE_TRANSFORMERS_HOME=/home/user/.cache/huggingface
+WORKDIR /app
 
-WORKDIR $HOME/app
-
-COPY --chown=user requirements.txt ./
+# Copy requirements and install Python packages
+COPY requirements.txt .
 RUN pip install --no-cache-dir --upgrade pip && \
     pip install --no-cache-dir -r requirements.txt
 
-COPY --chown=user . .
+# Copy the rest of the project
+COPY . .
 
-EXPOSE 7860
+# Make the startup script executable
+RUN chmod +x start.sh
 
-HEALTHCHECK --interval=30s --timeout=10s --start-period=180s --retries=3 \
-    CMD curl -f http://localhost:7860/_stcore/health || exit 1
+# Render injects a $PORT variable. Default to 10000.
+ENV PORT=10000
+EXPOSE $PORT
 
-CMD ["supervisord", "-c", "/home/user/app/supervisord.conf"]
+# Run the startup script
+CMD ["./start.sh"]

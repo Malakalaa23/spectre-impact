@@ -9,6 +9,13 @@ Uses re.fullmatch (not re.match) against the whitelist so a command like
 re.match alone only anchors the start of the string and would have let
 the appended command slip through.
 
+Demo mode:
+    When demo_mode=True, whitelisted commands are marked "success" in
+    the audit log without being executed. This is what lets the demo
+    show a completed rollback when there is no Kubernetes cluster on
+    the presenter's laptop. The audit log records the outcome as
+    "simulated" so the record is honest about what happened.
+
 Database:
     Uses the same SQLite connection helper as the rest of Spectre
     Impact (`database._get_connection`). The audit table is created
@@ -22,6 +29,7 @@ import logging
 import re
 import subprocess
 from dataclasses import dataclass
+from datetime import datetime, timezone
 from typing import List
 
 from database import _get_connection
@@ -37,6 +45,7 @@ logger = logging.getLogger(__name__)
 # anything not matched here is blocked by default.
 WHITELIST_PATTERNS = [
     r"kubectl rollout undo deployment/[\w-]+(\s+--to-revision=\d+)?",
+    r"kubectl rollout status deployment/[\w-]+",
     r"docker service update --rollback [\w-]+",
     r"git revert --no-edit [0-9a-f]{7,40}",
 ]
@@ -93,8 +102,15 @@ def _log(command: str, dry_run: bool, status: str, output: str) -> None:
         try:
             conn.execute(
                 "INSERT INTO rollback_audit_log "
-                "(command, dry_run, status, output) VALUES (?, ?, ?, ?)",
-                (command, 1 if dry_run else 0, status, output or ""),
+                "(command, dry_run, status, output, created_at) "
+                "VALUES (?, ?, ?, ?, ?)",
+                (
+                    command,
+                    1 if dry_run else 0,
+                    status,
+                    output or "",
+                    datetime.now(timezone.utc).isoformat(),
+                ),
             )
             conn.commit()
         finally:
@@ -106,14 +122,23 @@ def _log(command: str, dry_run: bool, status: str, output: str) -> None:
 # ---------------------------------------------------------------------------
 # Execution
 # ---------------------------------------------------------------------------
-def execute_rollback(commands: List[str], dry_run: bool = True) -> dict:
+def execute_rollback(
+    commands: List[str],
+    dry_run: bool = True,
+    demo_mode: bool = False,
+) -> dict:
     """
     Validate and (optionally) execute a list of rollback commands.
 
     Args:
-        commands: The list of shell commands to run.
-        dry_run:  If True, validate and log but never actually execute.
-                  Defaults to True so a caller must opt in to real runs.
+        commands:   The list of shell commands to run.
+        dry_run:    If True, validate and log but never actually execute.
+                    Defaults to True so a caller must opt in to real runs.
+        demo_mode:  If True, whitelisted commands are marked "success" in
+                    the audit log without being executed. Used on stage
+                    when there is no live cluster to roll back. The audit
+                    log records the outcome as "simulated" so the record
+                    stays honest about what actually happened.
 
     Returns:
         {"results": [{"command": ..., "status": ..., "reason"/"output": ...}]}
@@ -124,6 +149,7 @@ def execute_rollback(commands: List[str], dry_run: bool = True) -> dict:
     for command in commands:
         check = validate_command(command)
 
+        # Not whitelisted — block and log regardless of mode.
         if not check.safe:
             _log(command, dry_run, "blocked", check.reason)
             results.append({
@@ -133,11 +159,23 @@ def execute_rollback(commands: List[str], dry_run: bool = True) -> dict:
             })
             continue
 
+        # Dry run — no execution, no simulation, just validation.
         if dry_run:
             _log(command, dry_run, "dry_run_ok", "")
             results.append({"command": command, "status": "dry_run_ok"})
             continue
 
+        # Demo mode — pretend the command ran.
+        if demo_mode:
+            _log(command, False, "success", "simulated (demo mode)")
+            results.append({
+                "command": command,
+                "status": "success",
+                "output": "simulated (demo mode)",
+            })
+            continue
+
+        # Real execution.
         try:
             proc = subprocess.run(
                 command,

@@ -25,16 +25,17 @@ def clean_html(content: str) -> str:
 # (label, active_page name, target file, widget key, which view modes see it)
 
 NAV_ITEMS = [
-    ("🏠  Dashboard",         "Dashboard",         "app.py",                   "side_dashboard", ["developer"]),
+    ("🏠  Dashboard",         "Dashboard",         "app.py",                   "side_dashboard",  ["developer"]),
     ("🔍  PR Analysis",       "PR Analysis",       "pages/PR_Analysis.py",     "side_pr",         ["developer"]),
     ("💬  AI Chat",            "Chat",              "pages/Chat.py",            "side_chat",       ["developer"]),
-    ("🔍  Code Review",        "Code Review",       "pages/Code_Review.py",    "side_review",     ["developer"]),
-    ("🔄  Rollback Center",    "Rollback Center",   "pages/Rollback_Center.py","side_rollback",   ["developer"]),
+    ("🔍  Code Review",        "Code Review",       "pages/Code_Review.py",     "side_review",     ["developer"]),
+    ("🔄  Rollback Center",    "Rollback Center",   "pages/Rollback_Center.py", "side_rollback",   ["developer"]),
+    ("🧱  Terraform Parser",   "Terraform Parser",  "pages/Terraform_Parser.py","side_terraform",  ["developer"]),
     ("📊  Analytics",         "Analytics",         "pages/Analytics.py",       "side_analytics",  ["developer"]),
-    ("📅  Weekly Review",     "Weekly Review",     "pages/Weekly_Review.py",   "side_weekly",      ["developer"]),
-    ("💼  Business Overview", "Business Overview", "pages/Business_View.py",  "side_business",    ["business"]),
-    ("⚙️  How It Works",      "How It Works",      "pages/How_It_Works.py",    "side_how",         ["developer"]),
-    ("ℹ️  About",             "About",             "pages/About.py",           "side_about",       ["developer", "business"]),
+    ("📅  Weekly Review",     "Weekly Review",     "pages/Weekly_Review.py",   "side_weekly",     ["developer"]),
+    ("💼  Business Overview", "Business Overview", "pages/Business_View.py",   "side_business",   ["business"]),
+    ("⚙️  How It Works",      "How It Works",      "pages/How_It_Works.py",    "side_how",        ["developer"]),
+    ("ℹ️  About",             "About",             "pages/About.py",           "side_about",      ["developer", "business"]),
 ]
 
 DEFAULT_LANDING_PAGE = {
