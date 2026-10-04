@@ -56,3 +56,5 @@ test_everything.py
 
 .cache/
 webhook.log
+
+history.db
