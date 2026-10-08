@@ -62,3 +62,5 @@ history.db
 cache.db
 frontend/runtime_data/
 frontend/sample_upload.json
+
+demo_terraform/
