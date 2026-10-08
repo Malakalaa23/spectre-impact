@@ -58,3 +58,7 @@ test_everything.py
 webhook.log
 
 history.db
+
+cache.db
+frontend/runtime_data/
+frontend/sample_upload.json
